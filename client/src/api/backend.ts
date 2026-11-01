@@ -222,3 +222,13 @@ export function onAnalysisFailed(
     cb(ev.payload.id, ev.payload.error),
   );
 }
+
+/**
+ * 把纯文本写到用户选定的路径（导出用）。
+ *
+ * 路径由前端 `dialog.save()` 得到 —— 用户亲手选的位置，后端不再校验
+ * 目录白名单。父目录不存在会自动创建。
+ */
+export async function writeTextFile(path: string, content: string): Promise<void> {
+  return invoke<void>('write_text_file', { path, content });
+}

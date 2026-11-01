@@ -74,7 +74,8 @@
 
   /* 尺寸 */
   --track-header-width: 148px;
-  --ruler-height: 30px;
+  /* 必须和 tokens.ts 的 SIZES.rulerHeight 一致（Canvas 用那个，CSS 用这个） */
+  --ruler-height: 44px;
 
   font-family: 'Inter', -apple-system, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', 'Yu Gothic UI',
     sans-serif;

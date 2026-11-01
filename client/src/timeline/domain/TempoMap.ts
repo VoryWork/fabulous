@@ -140,7 +140,10 @@ function findAnchorIndex(map: TempoMapData, tick: number): number {
 export function tickToSec(map: TempoMapData, tick: number): number {
   const { points, anchors } = map;
   if (points.length === 1) {
-    return tick / ticksPerSecond(anchors[0].bpm);
+    // 必须加 points[0].sec：tick 0 对应的不是一个绝对秒数，
+    // 而是「第一个小节起点」（`startSec`）。《何なんw》补了开头
+    // 虚拟小节后 startSec = 0.10，漏了这一项就会整体错 0.10s。
+    return points[0].sec + tick / ticksPerSecond(anchors[0].bpm);
   }
 
   if (tick <= points[0].tick) {
@@ -159,11 +162,13 @@ export function tickToSec(map: TempoMapData, tick: number): number {
 export function secToTick(map: TempoMapData, sec: number): number {
   const { points, anchors } = map;
   if (points.length === 1) {
-    return Math.round(sec * ticksPerSecond(anchors[0].bpm));
+    return Math.round((sec - points[0].sec) * ticksPerSecond(anchors[0].bpm));
   }
 
   if (sec <= points[0].sec) {
-    return Math.round(sec * ticksPerSecond(anchors[0].bpm));
+    // 同理：`startSec` 之前的秒数是**负 tick**（谱面外），
+    // 不能直接拿绝对秒数乘。调用方会 clamp 到 [0, totalTicks]。
+    return Math.round((sec - points[0].sec) * ticksPerSecond(anchors[0].bpm));
   }
 
   // 反向二分

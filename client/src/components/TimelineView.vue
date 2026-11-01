@@ -896,11 +896,45 @@ function drawRuler() {
         const t = bStart + k * beatTick;
         if (t < range.startTick || t > range.endTick) continue;
         const x = snapPxLine(tickToX(vp, t));
-        ctx.moveTo(x, h - 6);
+        ctx.moveTo(x, h - 7);
         ctx.lineTo(x, h);
       }
     }
     ctx.stroke();
+  }
+
+  /**
+   * ---- 1b) **拍号**（1 / 2 / 3 / 4）
+   *
+   * 只有刻度线的话，用户没法一眼判断「这个和弦落在第几拍上」。
+   * 拍是一个**时刻**，标上序号才看得出它属于小节的第几拍。
+   *
+   * 数字画在**该拍的区间中点**（`x + beatPx/2`），不是压在刻度线上 ——
+   * 刻度线是拍的起点，数字代表这一整拍的位置。
+   *
+   * 空间不够（`beatPx < 22`）时整体隐藏：挤在一起反而看不清。
+   */
+  if (beatPx >= 22) {
+    ctx.fillStyle = COLORS.textMuted;
+    ctx.font = `500 10px system-ui, -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    const labelY = h - 15;
+    for (let b = firstBar; b <= lastBar; b++) {
+      const bStart = tickOfBar(meterMap, b);
+      const meter = meterAt(meterMap, bStart);
+      const beatTick = (960 * 4) / meter.denominator;
+      for (let k = 0; k < meter.numerator; k++) {
+        const t = bStart + k * beatTick;
+        if (t < range.startTick || t > range.endTick) continue;
+        const x = snapPxLine(tickToX(vp, t)) + beatPx / 2;
+        if (x < -20 || x > w + 20) continue;
+        // 第 1 拍加粗一点：它是小节的锚点
+        ctx.fillStyle = k === 0 ? COLORS.textSecondary : COLORS.textMuted;
+        ctx.fillText(String(k + 1), x, labelY);
+      }
+    }
+    ctx.textAlign = 'start';
   }
 
   // ---- 2) 小节刻度（强拍，11px）+ 小节号
@@ -918,7 +952,7 @@ function drawRuler() {
     ctx.strokeStyle = isGroup ? COLORS.textSecondary : COLORS.textMuted;
     ctx.lineWidth = isGroup ? 1.2 : 1;
     ctx.beginPath();
-    ctx.moveTo(x, h - 11);
+    ctx.moveTo(x, h - 13);
     ctx.lineTo(x, h);
     ctx.stroke();
 

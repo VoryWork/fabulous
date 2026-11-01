@@ -66,6 +66,7 @@ pub fn run() {
             commands::evaluate_reconnect_candidate,
             commands::confirm_reconnect,
             commands::song_audio_path,
+            commands::write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -417,6 +417,29 @@ pub fn confirm_reconnect(
         .map_err(|e| e.to_string())
 }
 
+/// 把纯文本写到用户指定的路径（导出用）。
+///
+/// ## 为什么不装 `plugin-fs`
+///
+/// 导出只需要「写一个文件」这一件事，为它引入整个 fs 插件（外加一套
+/// scope 配置）不划算。路径由前端 `dialog.save()` 拿到 —— 那是用户
+/// **亲手选的**位置，不需要再做目录白名单。
+///
+/// ## 必须建父目录
+///
+/// 用户可能选一个还没建的子目录（Windows 的保存对话框允许这样做），
+/// 直接 `fs::write` 会报「找不到路径」。
+#[tauri::command]
+pub async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if let Some(dir) = p.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("无法创建目录: {e}"))?;
+        }
+    }
+    std::fs::write(&p, content).map_err(|e| format!("写入失败: {e}"))
+}
+
 // ---------------------------------------------------------------- 内部工具
 
 /// 生成一个短随机 id（不引 uuid crate，减少依赖）

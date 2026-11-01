@@ -26,7 +26,7 @@
  * 而不是去猜哪个拍点是假的 —— 0.20s 和 0.42s 的界限在变速歌里不牢靠。
  */
 import { describe, expect, it } from 'vitest';
-import { fixDownbeats, makeBeatSnapper, padLeadingBar } from './realData';
+import { fixDownbeats, makeBeatSnapper } from './realData';
 
 /** 造一个理想网格：bpm 固定，小节长度 = 4 拍 */
 function idealGrid(bars: number, beatSec = 0.42, start = 0.5) {
@@ -203,63 +203,15 @@ describe('fixDownbeats', () => {
 });
 
 /**
- * 开头补一个虚拟小节（`padLeadingBar`）。
+ * ⚠️ 这里曾经有一组 `padLeadingBar` 测试（补开头虚拟小节），已随功能一起撤销。
  *
- * ## 用户报的问题
+ * 原因值得留在这里：
+ *   **拍是一个时刻，不是一段区间。** 在第一个 downbeat 前面凭空插入一个时刻，
+ *   会让后面所有拍的**序号**整体后移一位 —— 用户看到的正是
+ *   「第一条竖线不是第一拍」，即整体偏 1 拍。
  *
- * 「《何なんw》小节第一拍仍然会挪到第二拍」「歌曲从头播放时，光标会先往前跑
- * 一阵，然后又跳回开头」「如果开头有静音段，是不是可以加一个小节给他放出来」
+ *   而且插入的那个时刻不是模型检出的拍，不代表任何真实击打。
+ *   为了「谱面别空着」伪造一个拍，是拿正确性换观感。
  *
- * ## 根因
- *
- * 模型的第一个 downbeat 是「音乐真正进入」的位置（2.76s），而音频 0.28s 起
- * 就有前奏了。于是 tick 0 = 2.76s —— 前奏那 2.76 秒**完全不在网格里**：
- * 谱面左边空白、播放时光标卡在最左端不动，看起来就像「第一拍跑到第二拍去了」。
+ * 正确行为：第一个真实拍就是第 1 拍，前奏该空着就空着。
  */
-describe('padLeadingBar', () => {
-  /* 注意：padLeadingBar 与 fixDownbeats 都是幂等的，
-     后端补过的数据走一遍不会再补。 */
-
-  it('第一个 downbeat 离 0 超过半小节时，补一个虚拟小节', () => {
-    const d = [2.76, 5.42, 8.08, 10.74];
-    const out = padLeadingBar(d);
-    expect(out).toHaveLength(5);
-    expect(out[0]).toBeCloseTo(0.1, 5); // 2.76 - 2.66
-    expect(out[1]).toBe(2.76);
-  });
-
-  it('第一个 downbeat 太靠后时，虚拟小节起点取 0（不产出负数）', () => {
-    // 1.5 已超过半个小节（1.33）但要补的小节起点会是负数 → 取 0
-    const d = [1.5, 4.16, 6.82];
-    const out = padLeadingBar(d);
-    expect(out).toHaveLength(4);
-    expect(out[0]).toBe(0);
-  });
-
-  it('已经贴近 0 就不补（幂等）', () => {
-    const d = [0.1, 2.76, 5.42];
-    expect(padLeadingBar(d)).toEqual(d);
-  });
-
-  it('补出来的数据再补一次不会变（后端已补过）', () => {
-    const once = padLeadingBar([2.76, 5.42, 8.08, 10.74]);
-    const twice = padLeadingBar(once);
-    expect(twice).toEqual(once);
-  });
-
-  it('补完之后，beats 重建的小节数对得上', () => {
-    const fixed = padLeadingBar([2.76, 5.42, 8.08, 10.74]);
-    const beats = [2.76, 3.42, 4.09, 4.75];
-    const snap = makeBeatSnapper(beats, fixed);
-    // 第一个虚拟小节起点应映射到 tick 0
-    expect(snap(0.1)).toBe(0);
-    // 原来的第一个 downbeat 现在是第 2 小节起点
-    expect(snap(2.76)).toBe(3840);
-  });
-
-  it('数据太短时原样返回（不崩）', () => {
-    expect(padLeadingBar([])).toEqual([]);
-    expect(padLeadingBar([1])).toEqual([1]);
-    expect(padLeadingBar([1, 3])).toEqual([1, 3]);
-  });
-});

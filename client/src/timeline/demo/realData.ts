@@ -301,31 +301,55 @@ export function makeRealTempoMap(a: AnalysisFile): TempoMapData {
    * 这样网格锚定在真实 downbeat 位置上，同时保持 BPM 语义。
    *
    * 逐小节换算而不是用全局中位 BPM，是为了吸收模型的局部误差
-   * （实测小节间隔 3.08–3.16s 有 ±2.6% 的抖动）。
+   * （实测小节间隔有 ±2.6% 抖动，用平均 BPM 会随播放累积偏差，
+   * 表现为「有时候对、有时候滞后两拍」）。
+   *
+   * ## 空态防御（必须有）
+   *
+   * `createTempoMap` 遇到非法输入是**直接抛 RangeError** 的，
+   * 而 Vue 的 computed 抛错 = 整页白屏。歌还没分析完时三条全中：
+   *
+   *   downbeatsSec = []      → (d.length-1)*BAR 是负数 tick，assertTick 抛
+   *   meta.bpmMedian = 0     → 「bpm 必须为正有限数」抛
+   *   song.durationSec = 0   → 「durationSec 必须为正有限数」抛
+   *
+   * 所以兜底必须写在这个函数里，不能指望调用方。
    */
-  const d = a.downbeatsSec;
+  const d = a.downbeatsSec ?? [];
+  const durationSec =
+    Number.isFinite(a.song?.durationSec) && a.song.durationSec > 0 ? a.song.durationSec : 1;
+  const midBpm =
+    Number.isFinite(a.meta?.bpmMedian) && a.meta.bpmMedian > 0 ? a.meta.bpmMedian : 120;
+
+  // 少于 2 个小节就没有「小节时长」可言，退回恒定 BPM
+  if (d.length < 2) {
+    const start = Number.isFinite(d[0]) && d[0] > 0 ? d[0] : 0;
+    return createTempoMap([{ tick: 0, bpm: midBpm }], durationSec, start);
+  }
+
   const anchors: { tick: number; bpm: number }[] = [];
 
   for (let i = 0; i < d.length - 1; i++) {
     const barSec = d[i + 1] - d[i];
-    const bpm = barSec > 0 ? (4 / barSec) * 60 : a.meta.bpmMedian;
+    const raw = barSec > 0 ? (4 / barSec) * 60 : midBpm;
+    // 单个坏小节（NaN / 0 / 负数）不该炸掉整页
+    const bpm = Number.isFinite(raw) && raw > 0 ? raw : midBpm;
     anchors.push({ tick: i * TICKS_PER_BAR, bpm });
   }
   // 最后一小节用中位值
-  anchors.push({ tick: (d.length - 1) * TICKS_PER_BAR, bpm: a.meta.bpmMedian });
+  anchors.push({ tick: (d.length - 1) * TICKS_PER_BAR, bpm: midBpm });
   // 末尾再补一个，让最后一小节之后能外推
-  anchors.push({ tick: d.length * TICKS_PER_BAR, bpm: a.meta.bpmMedian });
+  anchors.push({ tick: d.length * TICKS_PER_BAR, bpm: midBpm });
 
   /**
    * ⚠️ 关键：tick 0 必须对应**第一个 downbeat 的秒数**，而不是 0。
    *
-   * 这首歌第一个小节在 0.36s（前奏），如果让 tick 0 = 0s，
-   * 整条时间轴会整体提前 0.36s（约半拍），
-   * 表现就是"和弦开始位置飘了"、播放头和音频对不上。
+   * 第一个小节可能在前奏之后（《何なんw》补虚拟小节后是 0.10s）。
+   * 若让 tick 0 = 0s，整条时间轴整体提前，播放头和音频就对不上。
    */
-  const startSec = d[0] ?? 0;
+  const startSec = Number.isFinite(d[0]) && d[0] > 0 ? d[0] : 0;
 
-  return createTempoMap(anchors, a.song.durationSec, startSec);
+  return createTempoMap(anchors, durationSec, startSec);
 }
 
 
@@ -380,46 +404,21 @@ export function fixDownbeats(downbeatsSec: readonly number[]): number[] {
 }
 
 /**
- * **把开头没被网格覆盖的那段补成一个小节。**
+ * ⚠️ 这里曾经有 `padLeadingBar`（在第一个 downbeat 前补一个虚拟小节），已删除。
  *
- * ## 问题
+ * 删掉的原因 —— 这套思路从根上就是错的：
  *
- * 模型的第一个 downbeat 往往是「音乐真正进入」的位置。《何なんw》是 2.76s，
- * 而音频 0.28s 起就有前奏音乐了。于是 tick 0 = 第 2.76 秒：
+ *   **拍是一个时刻，不是一段区间。**
  *
- *   - 谱面第一次出现小节线在 2.76s，前面 2.76s 是**完全空白**
- *   - 播放 0~2.76s 时播放头只能卡在最左端不动
- *   - 用户看到的像是「第一拍跑到第二拍去了」
+ * 在第一个 downbeat 前面凭空插入一个时刻，会让后面所有拍的**序号**
+ * 整体后移一位。用户看到的正是「第一条竖线不是第一拍」，
+ * 也就是「整体偏 1 拍」——不是时间漂移，而是序号被顶掉了一格。
  *
- * ## 做法
+ * 而且插入的那个时刻不是模型检出的拍，不代表任何真实击打。
+ * 为了「谱面别空着、光标别卡在左边」而伪造一个拍，是拿正确性换观感。
  *
- * 在第一个 downbeat 前面补一个虚拟小节起点（`d[0] - 中位小节时长`，
- * 不足 0 就取 0），让前奏也被网格覆盖。
- *
- * 补出来的那一小节内部拍点是**均分**的，只是为了让谱面连续、播放头能动；
- * 前奏如果是散板，这些拍点本来也不代表真实节拍。
- *
- * ## 幂等性（重要）
- *
- * 只在 `d[0]` 离 0 超过半个小节时才补。补完之后 `d[0]` 已经接近 0。
- * 所以后端已经补过的数据再走一遍这里**不会补第二次**。
+ * 正确行为：**第一个真实拍就是第 1 拍**，前奏该空着就空着。
  */
-export function padLeadingBar(downbeatsSec: readonly number[]): number[] {
-  const d = [...downbeatsSec];
-  if (d.length < 3 || !(d[0] > 0)) return d;
-
-  const spans: number[] = [];
-  for (let i = 1; i < d.length; i++) spans.push(d[i] - d[i - 1]);
-  const sorted = [...spans].sort((a, b) => a - b);
-  const med = sorted[Math.floor(sorted.length / 2)];
-  if (!(med > 0)) return d;
-
-  // 第一个 downbeat 已经贴近 0（或只差半个小节以内）→ 有网格覆盖，不补
-  if (d[0] < med * 0.5) return d;
-
-  const pad = Math.max(0, d[0] - med);
-  return [pad, ...d];
-}
 /** 4/4 拍号（真实数据里 96.8% 的小节是 4 拍） */
 export function makeRealMeterMap(): MeterMapData {
   return createMeterMap([{ startTick: 0, numerator: 4, denominator: 4 }]);

@@ -24,14 +24,13 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 
 import analysisJson from './timeline/demo/analysis.json';
 import {
-  makeTempoMapFromSegments,
+  makeRealTempoMap,
   makeRealMeterMap,
   makeRealTracks,
   totalTicksOf,
   inferKey,
   makeBeatSnapper,
   fixDownbeats,
-  padLeadingBar,
   makeDegreeTrack,
   type AnalysisFile,
   type RealClip,
@@ -39,9 +38,15 @@ import {
   type TempoSegment,
 } from './timeline/demo/realData';
 import { relatedMinor } from './timeline/domain/ChordNotation';
-import { loadEdits, saveEdits, type SongEdits, type SongListItem } from './api/backend';
+import { loadEdits, saveEdits, writeTextFile, type SongEdits, type SongListItem } from './api/backend';
+import {
+  buildFbsongBundle,
+  buildLectureMarkdown,
+  serializeFbsong,
+  suggestFileName,
+} from './export/exporters';
 import { barAt, tickOfBar } from './timeline/domain/MeterMap';
-import { tickToSec, bpmAt } from './timeline/domain/TempoMap';
+import { tickToSec, bpmAt, createConstantTempoMap } from './timeline/domain/TempoMap';
 import { usePlayback } from './timeline/audio/usePlayback';
 import { SilentEngine, WebAudioEngine, type AudioEngine } from './timeline/audio/AudioEngine';
 
@@ -127,13 +132,27 @@ const data = computed<AnalysisFile>(() => {
    * 这里是给**磁盘上的旧产物**兜底（旧文件不会自动重算）。
    */
   if (!raw.downbeatsSec || raw.downbeatsSec.length < 3) return raw;
-  // 再补一个开头小节：模型第一个 downbeat 常是「音乐真正进入」的位置，
-  // 它到 0 之间那段（前奏）本来完全不在网格里 —— 谱面空白、播放头卡死。
-  const fixed = padLeadingBar(fixDownbeats(raw.downbeatsSec));
+  /**
+   * ⚠️ **不要在这里补开头虚拟小节**（做错过一次，已撤销）。
+   *
+   * 曾经加过 `padLeadingBar`：当第一个 downbeat 离 0 较远时，
+   * 在它前面塞一个「虚拟小节起点」。目的是让前奏也落在网格里。
+   *
+   * 但「拍是一个**时刻**，不是一段区间」。凭空塞一个时刻进去，
+   * 等于把所有后续拍的时刻**序号整体推后一位** ——
+   * 用户看到的就是「第一条竖线不是第一拍」，即整体偏 1 拍。
+   *
+   * 更根本的问题：那个虚拟起点不是模型检出的拍，它不代表任何
+   * 真实击打。为了「谱面别空着」而伪造一个拍，是拿正确性换观感。
+   *
+   * 前奏该空着就空着 —— 第一个真实拍就是第 1 拍。
+   */
+  const fixed = fixDownbeats(raw.downbeatsSec);
   // 没变化就返回原对象，避免下游 computed 全部失效重算
   const same = fixed.every((v, i) => v === raw.downbeatsSec[i]);
   return same ? raw : { ...raw, downbeatsSec: fixed };
 });
+
 
 const tempoSegments = ref<TempoSegment[]>([]);
 
@@ -157,13 +176,27 @@ watch(
     }
     try {
       const a = JSON.parse(raw) as AnalysisFile;
+      /**
+       * 速度段的 `bar` 索引必须和**谱面**用同一套小节编号。
+       *
+       * `data` 在入口只做了 `fixDownbeats`（挪异常小节的**边界**，不改数量），
+       * 数量本身不变，这里用同一个函数算一遍只是为了确保两边一致。
+       * 若直接用 raw 的 `downbeatsSec.length`，速度段可能比谱面少一节。
+       */
+      const barCount = fixDownbeats(a.downbeatsSec).length;
+      const shift = Math.max(0, barCount - a.downbeatsSec.length);
       tempoSegments.value =
         a.tempoSegments && a.tempoSegments.length > 0
-          ? a.tempoSegments
+          ? a.tempoSegments.map((s, i) => ({
+              ...s,
+              // 第一段必须从 bar 0 开始：`createTempoMap` 要求首个锚点 tick = 0
+              startBar: i === 0 ? 0 : s.startBar + shift,
+              endBar: s.endBar + shift,
+            }))
           : [
               {
                 startBar: 0,
-                endBar: a.downbeatsSec.length,
+                endBar: barCount,
                 bpm: a.meta.bpmMedian,
               },
             ];
@@ -352,7 +385,46 @@ if (library.standalone) {
     [{ startBar: 0, endBar: demo.downbeatsSec.length, bpm: demo.meta.bpmMedian }];
 }
 
-const tempoMap = computed(() => makeTempoMapFromSegments(data.value, tempoSegments.value));
+
+/**
+ * 时间换算的权威表。
+ *
+ * ## 为什么默认用 `makeRealTempoMap`（逐小节真实时长）
+ *
+ * 原来用的是 `makeTempoMapFromSegments`：**全曲一个平均 BPM 均匀推进**。
+ * 但谱面和和弦走的是 `beatsSec`（真实拍点，有 ±2% 抖动）。
+ * 两套网格一旦不同源，偏差就会随播放累积 ——
+ * 用户看到的就是「有时候对、有时候滞后两拍」这种没规律的表现。
+ *
+ * `makeRealTempoMap` 把每个小节的**实际时长**换算成该小节的 BPM，
+ * 于是 tick ↔ 秒 与 downbeats 严格一致，播放头和谱面永远不会分家。
+ *
+ * ## 为什么**不再**按「用户改过 BPM」切换成 segments
+ *
+ * 之前有一个 `tempoEdited` 开关：用户改过速度轨的 BPM 就改用
+ * `makeTempoMapFromSegments`（全曲均匀推进）。结果用户发现
+ * 「有时候对、有时候滞后」—— 因为只要这个开关被打开，
+ * 时间换算就悄悄换成了另一套网格，而这个状态是不可见的。
+ *
+ * 时间换算必须**只有一个来源**（真实 downbeat 时长），否则
+ * 播放头和音频的关系会随一个看不见的开关变化，极难排查。
+ * 改 BPM 仍然会更新速度轨的显示，但不再影响 tick ↔ 秒。
+ */
+const tempoMap = computed(() => {
+  /**
+   * 兜底：`createTempoMap` 对非法输入抛 RangeError，而 computed 抛错
+   * 会让整个页面白屏。哪怕上游已经做了防御，这里再包一层。
+   *
+   * 白屏是最糟的失败方式 —— 用户看不到任何信息，也没法自己恢复。
+   * 退化成「120 BPM 的空白时间轴」至少还能操作。
+   */
+  try {
+    return makeRealTempoMap(data.value);
+  } catch (e) {
+    console.warn('[tempo] 构建 TempoMap 失败，退回占位值', e);
+    return createConstantTempoMap(120, Math.max(1, data.value.song.durationSec || 1), 0);
+  }
+});
 
 const meterMap = computed(() => makeRealMeterMap());
 const totalTicks = computed(() => totalTicksOf(data.value));
@@ -452,7 +524,21 @@ const editKey = computed(() => {
   const id = library.currentId.value ?? '';
   // 末尾的 r/x 是「编辑层是否加载完」：切歌时会先 x 后 r，
   // 时间轴因此重建两次 —— 第二次才拿到含落盘编辑的 tracks。
-  return `${id}:${analysisKey.value}:${editsReady.value[id] ? 'r' : 'x'}`;
+  // ## 编辑层未就绪时，key 必须**不随数据变化**
+  //
+  // `analysisKey` 依赖 `data`（异步加载），如果把它写进未就绪的 key，
+  // 就会出现这个时序灾难：
+  //
+  //   切歌 → reset（空数据）
+  //   data 加载完 → analysisKey 变 → 再 reset（此时 edits 还没回来，
+  //                tracks 里没有用户编辑）
+  //   → 编辑层被灌成「模型原始结构」→ emit → 判定「没改过」→ 清空已存的编辑
+  //   edits 终于加载完 → 已经晚了
+  //
+  // 所以加载期间给一个**恒定值**，只有 ready 之后才带上真指纹。
+  if (!id) return '';
+  if (!editsReady.value[id]) return `${id}:pending`;
+  return `${id}:${analysisKey.value}:r`;
 });
 
 /**
@@ -591,7 +677,17 @@ function onChordEditsChange(clips: ChordEditSnapshot[]) {
       c.endTick === orig[i].endTick,
     );
   if (same) {
-    if (currentEdits.value.chordEdit) patchCurrentEdits({ chordEdit: undefined });
+    // ## 不要在这里「清空 chordEdit」
+    //
+    // 原来写的是 `patchCurrentEdits({ chordEdit: undefined })`，想法是
+    // 「内容和原始一样 = 用户撤销了所有编辑，顺手清理」。但它有个致命前提：
+    // **必须确定编辑层里的内容就是用户真实看到的**。
+    //
+    // 加载期间编辑层可能被临时灌成模型数据（data 已到、edits 未到），
+    // 这时 emit 出来的就是原始内容 → 判定 same → 把**已落盘的编辑删掉**。
+    // 用户看到的现象就是「改过的结构，一重启又回来了」。
+    //
+    // 清理交给显式的「恢复为 AI 结果」入口，自动判定一律不删。
     return;
   }
 
@@ -619,7 +715,8 @@ function onSectionEditsChange(clips: SectionEditSnapshot[]) {
       !c.key,
     );
   if (same) {
-    if (currentEdits.value.sections) patchCurrentEdits({ sections: undefined });
+    // 同上：**绝不能自动清空 sections**。加载时序会让编辑层短暂等于模型数据，
+    // 那时清空等于把用户划好的段落删了。清空只走「恢复为 AI 结构」。
     return;
   }
 
@@ -813,6 +910,8 @@ const dictionary = ref<'submission' | 'ismir2017' | 'full'>(SONG.value.dictionar
 
 /** 修改某段 BPM（速度轨双击编辑） */
 function onTempoChange(payload: { index: number; bpm: number }) {
+  // 只更新速度轨的**显示值**。时间换算仍然只用真实 downbeat 时长 ——
+  // 改 BPM 不该让播放头和音频分家（见 tempoMap 的说明）。
   tempoSegments.value = tempoSegments.value.map((s, i) =>
     i === payload.index ? { ...s, bpm: payload.bpm } : s,
   );
@@ -857,6 +956,78 @@ async function onReanalyze() {
   if (!id || library.standalone) return;
   if (library.progress.value[id]) return; // 已在分析中
   await library.startAnalysis(id);
+}
+
+/* ---------------------------------------------------------------- 导出 */
+
+/** 有和弦或拍点数据才允许导出（空谱面导出来是一份空报告） */
+const hasAnalyzableData = computed(() => (data.value.chords?.submission?.length ?? 0) > 0 || totalTicks.value > 0);
+
+/**
+ * 让用户选保存位置并写文件。
+ *
+ * 用 `dialog.save()` 拿路径（用户亲手选的），再交给 Rust 写 ——
+ * 这样不需要 `plugin-fs` 的目录白名单，也不受 webview 下载限制。
+ */
+async function saveTextWithDialog(args: {
+  fileName: string;
+  content: string;
+  filterName: string;
+  extensions: string[];
+}): Promise<void> {
+  if (library.standalone) {
+    // 浏览器模式：退化成下载链接，至少能用
+    const blob = new Blob([args.content], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = args.fileName;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return;
+  }
+
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const path = await save({
+    defaultPath: args.fileName,
+    filters: [{ name: args.filterName, extensions: args.extensions }],
+  });
+  if (!path) return; // 用户取消
+  await writeTextFile(path, args.content);
+}
+
+/** 导出讲解稿（Markdown，给人看） */
+async function onExportLecture() {
+  if (!hasAnalyzableData.value) return;
+  const md = buildLectureMarkdown({
+    analysis: data.value,
+    tracks: allTracks.value,
+    key: effectiveKey.value,
+    keyIsManual: currentKeyOverride.value != null,
+    bpm: SONG.value.bpm,
+  });
+  await saveTextWithDialog({
+    fileName: suggestFileName(SONG.value.title, 'md'),
+    content: md,
+    filterName: 'Markdown',
+    extensions: ['md'],
+  });
+}
+
+/** 导出 .fbsong（完整 JSON，给程序读） */
+async function onExportFbsong() {
+  if (!hasAnalyzableData.value) return;
+  const bundle = buildFbsongBundle({
+    analysis: data.value,
+    edits: currentEdits.value,
+    key: effectiveKey.value,
+    bpm: SONG.value.bpm,
+  });
+  await saveTextWithDialog({
+    fileName: suggestFileName(SONG.value.title, 'fbsong'),
+    content: serializeFbsong(bundle),
+    filterName: 'fbsong 工程文件',
+    extensions: ['fbsong'],
+  });
 }
 
 /** 当前曲目是否正在分析（顶栏按钮用） */
@@ -980,6 +1151,14 @@ const currentBar = computed(() => barAt(meterMap.value, playheadTick.value) + 1)
 
 /** 当前 BPM（播放条/状态栏显示用） */
 const currentBpm = computed(() => bpmAt(tempoMap.value, playheadTick.value));
+
+/**
+ * 诊断用：把当前 tick 用 tempoMap 反算回秒。
+ *
+ * 它应该永远等于 `currentSec`（引擎回报的音频位置）。
+ * 两者不等 = 播放头和谱面不是同一套时间换算，那就是「滞后」的来源。
+ */
+const mapSec = computed(() => tickToSec(tempoMap.value, playheadTick.value));
 
 /** 循环区间的秒表示（给播放条画高亮） */
 const loopSecA = computed(() =>
@@ -1266,6 +1445,9 @@ const selectedClip = computed(() => {
       @dictionary-change="dictionary = $event"
       :reanalyzing="reanalyzing"
       @reanalyze="onReanalyze"
+      :can-export="hasAnalyzableData"
+      @export-lecture="onExportLecture"
+      @export-fbsong="onExportFbsong"
       :key-is-manual="SONG.keyIsManual"
       :auto-key="autoKeyInfo"
       :key-value="effectiveKey"
@@ -1398,6 +1580,18 @@ const selectedClip = computed(() => {
     <!-- 开发期角标：提示这是假 UI -->
     <div class="dev-badge">
       第 {{ currentBar }} 小节 · ♩={{ currentBpm.toFixed(1) }} · tick {{ playheadTick }}
+      <!--
+        对齐诊断三件套：
+          ① 引擎回报的音频秒数（currentSec）
+          ② 用 tempoMap 把当前 tick 反算回秒（mapSec）
+          ③ 起点的秒数（data.downbeatsSec[0]）
+
+        ①② 应该永远相等 —— 不等说明 tempoMap 和播放头不是同一套换算。
+        ③ 变了说明 data 被重建（HMR / 重新加载）过。
+      -->
+      · {{ currentSec.toFixed(2) }}s
+      · map {{ mapSec.toFixed(2) }}s
+      · 起点 {{ data.downbeatsSec[0]?.toFixed(2) ?? '—' }}s
       <span v-if="!hasAudio"> · 静音推进</span>
     </div>
   </div>

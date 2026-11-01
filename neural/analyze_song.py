@@ -687,29 +687,21 @@ def run_beats(audio_path: Path, duration: float) -> tuple:
     # 拿补之前的那份去和补之后的相减，长度不同会直接抛
     # ValueError: operands could not be broadcast together with shapes (121,) (120,)
 
-    # ## 开头没被网格覆盖的那段，补成一个虚拟小节
+    # ## 不要补「开头虚拟小节」（做过，已撤销）
     #
-    # 模型的第一个 downbeat 通常是「音乐真正进入」的位置（《何なんw》是 2.76s），
-    # 而音频 0.28s 起就有前奏了。于是 tick 0 = 2.76s，前奏完全不在网格里：
-    # 谱面左边空白、播放 0~2.76s 时光标卡死在最左端。
+    # 曾经在第一个 downbeat 之前塞一个虚拟小节起点，想让前奏也落在网格里。
+    # 但这条思路是错的：
     #
-    # 补一个虚拟小节起点（`d[0] - 中位小节时长`，不足 0 取 0），让前奏也被覆盖。
-    # 补出来的小节内部拍点是均分的，只为让谱面连续；前奏若是散板，
-    # 这些拍点本来也不代表真实节拍。
+    #   **拍是一个时刻，不是一段区间。** 凭空插入一个时刻，会让后面所有
+    #   拍的时刻序号整体后移一位 —— 用户看到的正是「第一条竖线不是第
+    #   一拍」，也就是「整体偏 1 拍」。
     #
-    # 幂等：只在小节离 0 超过半小节时补，补完 d[0] 已接近 0，不会补第二次。
-    if len(downs) >= 3:
-        _spans = np.diff(downs)
-        _med_bar = float(np.median(_spans))
-        if _med_bar > 0 and downs[0] >= _med_bar * 0.5:
-            _pad = max(0.0, float(downs[0]) - _med_bar)
-            downs = np.concatenate([[ _pad ], downs])
-            sys.stderr.write(
-                f"[beats] 开头补一个虚拟小节: 0.00~{downs[1]:.2f}s"
-                + chr(10)
-            )
+    # 而且那个虚拟起点不是模型检出的拍，不代表任何真实击打。
+    # 为了「谱面别空着」伪造一个拍，是拿正确性换观感。
+    #
+    # 前奏该空着就空着：第一个真实拍就是第 1 拍。
 
-    # 到这里 downs 已经补过开头小节了，这才是「重建前」的正式基线
+    # 「重建前」的基线（用于统计挪动了多少个小节边界）
     before_downs = np.asarray(downs, dtype=float)
     beats, downs = _rebuild_beats_from_downbeats(
         beats, downs, BEATS_PER_BAR, duration
