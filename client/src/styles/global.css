@@ -1,0 +1,146 @@
+/**
+ * 全局样式 —— 浅色主题，配色取自设计稿（和声研究工作台）。
+ *
+ * 这里的 CSS 变量必须与 src/timeline/design/tokens.ts 的 COLORS 保持一致。
+ * tokens.ts 是给 Canvas 用的（Canvas 读不到 CSS 变量），这里是给 DOM 用的。
+ */
+
+:root {
+  /* 背景层次 */
+  --bg-app: #f2f3f3;
+  --bg-panel: #ffffff;
+  --bg-panel-alt: #f5f3f3;
+  --bg-track: #f6f6f6;
+  --bg-track-alt: #f4f4f4;
+  --bg-ruler: #ffffff;
+  --bg-hover: #f0f1f1;
+  --bg-active: #fdece3;
+
+  /* 边框 */
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+
+  /* 文本 */
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6e;
+  --text-muted: #9a9a9d;
+  --text-inverse: #ffffff;
+
+  /* 品牌橙 */
+  --accent: #fd651a;
+  --accent-hover: #ff7a33;
+  --accent-deep: #ff2100;
+  --accent-dim: #fdd8bd;
+  --accent-soft: #fdece3;
+
+  /* 语义 */
+  --success: #22a06b;
+  --warning: #e8a33d;
+  --danger: #e5484d;
+
+  /* 时间轴 */
+  --grid-bar: #e0e0e0;
+  --grid-bar-strong: #c8c8c8;
+  --grid-beat: #ededed;
+  --grid-sub-beat: #f2f2f2;
+  --playhead: #fd651a;
+  --selection: rgba(253, 101, 26, 0.1);
+  --selection-border: rgba(253, 101, 26, 0.45);
+
+  /* 片段 */
+  --track-chord: #3a3a3c;
+  --track-chord-bg: #f7f7f7;
+  --track-chord-bg-active: #fdd8bd;
+  --track-section: #c4703f;
+  --track-section-bg: #fdddcc;
+  --track-key: #5b7a9e;
+  --track-key-bg: #f1f4f8;
+  --track-degree: #7a6b58;
+  --track-degree-bg: #f4f4f4;
+  --track-lyric: #4a4a4c;
+  --track-lyric-bg: #fafafa;
+  --track-beat: #b1b1b3;
+
+  /* 段落专用 */
+  --section-verse: #fdddcc;
+  --section-pre: #fcdac8;
+  --section-chorus: #fdb08b;
+  --section-bridge: #d9c9fc;
+
+  /* 状态色 */
+  --state-draft: #e8a33d;
+  --state-confirmed: #22a06b;
+  --state-rejected: #b0b0b3;
+
+  /* 尺寸 */
+  --track-header-width: 148px;
+  --ruler-height: 30px;
+
+  font-family: 'Inter', -apple-system, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', 'Yu Gothic UI',
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+input,
+textarea {
+  font-family: inherit;
+}
+
+/* 滚动条（浅色） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d0d0d3;
+  border-radius: 0;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #b4b4b8;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

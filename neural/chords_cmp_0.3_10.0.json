@@ -1,0 +1,462 @@
+[
+ {
+  "start": 0.0,
+  "end": 0.604,
+  "chord": "N"
+ },
+ {
+  "start": 0.604,
+  "end": 3.669,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 3.669,
+  "end": 7.129,
+  "chord": "N"
+ },
+ {
+  "start": 7.129,
+  "end": 8.893,
+  "chord": "Bb:min"
+ },
+ {
+  "start": 8.893,
+  "end": 10.495,
+  "chord": "Eb:maj"
+ },
+ {
+  "start": 10.495,
+  "end": 11.796,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 11.796,
+  "end": 13.816,
+  "chord": "A:maj"
+ },
+ {
+  "start": 13.816,
+  "end": 17.09,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 17.09,
+  "end": 18.924,
+  "chord": "C#:maj"
+ },
+ {
+  "start": 18.924,
+  "end": 50.921,
+  "chord": "N"
+ },
+ {
+  "start": 50.921,
+  "end": 53.87,
+  "chord": "C#:min"
+ },
+ {
+  "start": 53.87,
+  "end": 56.007,
+  "chord": "Bb:min"
+ },
+ {
+  "start": 56.007,
+  "end": 63.948,
+  "chord": "N"
+ },
+ {
+  "start": 63.948,
+  "end": 66.247,
+  "chord": "E:maj"
+ },
+ {
+  "start": 66.247,
+  "end": 67.152,
+  "chord": "A:maj"
+ },
+ {
+  "start": 67.152,
+  "end": 73.004,
+  "chord": "C#:min"
+ },
+ {
+  "start": 73.004,
+  "end": 73.863,
+  "chord": "B:maj"
+ },
+ {
+  "start": 73.863,
+  "end": 75.627,
+  "chord": "Bb:maj"
+ },
+ {
+  "start": 75.627,
+  "end": 77.183,
+  "chord": "Eb:maj"
+ },
+ {
+  "start": 77.183,
+  "end": 79.737,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 79.737,
+  "end": 80.573,
+  "chord": "D:maj"
+ },
+ {
+  "start": 80.573,
+  "end": 85.449,
+  "chord": "C#:min"
+ },
+ {
+  "start": 85.449,
+  "end": 87.214,
+  "chord": "F:min"
+ },
+ {
+  "start": 87.214,
+  "end": 91.371,
+  "chord": "Bb:min"
+ },
+ {
+  "start": 91.371,
+  "end": 93.832,
+  "chord": "E:maj"
+ },
+ {
+  "start": 93.832,
+  "end": 99.567,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 99.567,
+  "end": 103.77,
+  "chord": "E:maj"
+ },
+ {
+  "start": 103.77,
+  "end": 107.926,
+  "chord": "A:maj"
+ },
+ {
+  "start": 107.926,
+  "end": 110.457,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 110.457,
+  "end": 113.871,
+  "chord": "C#:maj"
+ },
+ {
+  "start": 113.871,
+  "end": 115.357,
+  "chord": "Bb:min"
+ },
+ {
+  "start": 115.357,
+  "end": 117.029,
+  "chord": "N"
+ },
+ {
+  "start": 117.029,
+  "end": 121.022,
+  "chord": "A:maj"
+ },
+ {
+  "start": 121.022,
+  "end": 123.786,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 123.786,
+  "end": 127.222,
+  "chord": "C#:min"
+ },
+ {
+  "start": 127.222,
+  "end": 128.337,
+  "chord": "Eb:maj"
+ },
+ {
+  "start": 128.337,
+  "end": 130.45,
+  "chord": "A:maj"
+ },
+ {
+  "start": 130.45,
+  "end": 131.913,
+  "chord": "D:maj"
+ },
+ {
+  "start": 131.913,
+  "end": 133.933,
+  "chord": "C#:min"
+ },
+ {
+  "start": 133.933,
+  "end": 137.067,
+  "chord": "Ab:maj"
+ },
+ {
+  "start": 137.067,
+  "end": 140.434,
+  "chord": "C#:min"
+ },
+ {
+  "start": 140.434,
+  "end": 141.665,
+  "chord": "E:maj"
+ },
+ {
+  "start": 141.665,
+  "end": 143.708,
+  "chord": "A:maj"
+ },
+ {
+  "start": 143.708,
+  "end": 147.075,
+  "chord": "D:maj"
+ },
+ {
+  "start": 147.075,
+  "end": 150.558,
+  "chord": "B:min"
+ },
+ {
+  "start": 150.558,
+  "end": 152.091,
+  "chord": "C#:min"
+ },
+ {
+  "start": 152.091,
+  "end": 155.016,
+  "chord": "F#:min"
+ },
+ {
+  "start": 155.016,
+  "end": 157.129,
+  "chord": "G:maj"
+ },
+ {
+  "start": 157.129,
+  "end": 159.777,
+  "chord": "E:min7"
+ },
+ {
+  "start": 159.777,
+  "end": 160.52,
+  "chord": "Eb:7"
+ },
+ {
+  "start": 160.52,
+  "end": 166.371,
+  "chord": "C#:min"
+ },
+ {
+  "start": 166.371,
+  "end": 169.064,
+  "chord": "B:min"
+ },
+ {
+  "start": 169.064,
+  "end": 170.481,
+  "chord": "E:maj"
+ },
+ {
+  "start": 170.481,
+  "end": 172.013,
+  "chord": "A:maj"
+ },
+ {
+  "start": 172.013,
+  "end": 173.058,
+  "chord": "Eb:maj"
+ },
+ {
+  "start": 173.058,
+  "end": 174.962,
+  "chord": "D:maj"
+ },
+ {
+  "start": 174.962,
+  "end": 177.981,
+  "chord": "C#:maj"
+ },
+ {
+  "start": 177.981,
+  "end": 179.096,
+  "chord": "F:min"
+ },
+ {
+  "start": 179.096,
+  "end": 179.722,
+  "chord": "F#:min"
+ },
+ {
+  "start": 179.722,
+  "end": 180.512,
+  "chord": "N"
+ },
+ {
+  "start": 180.512,
+  "end": 184.506,
+  "chord": "B:min"
+ },
+ {
+  "start": 184.506,
+  "end": 187.153,
+  "chord": "E:maj"
+ },
+ {
+  "start": 187.153,
+  "end": 190.45,
+  "chord": "C#:min"
+ },
+ {
+  "start": 190.45,
+  "end": 192.61,
+  "chord": "D:dim"
+ },
+ {
+  "start": 192.61,
+  "end": 193.933,
+  "chord": "N"
+ },
+ {
+  "start": 193.933,
+  "end": 196.441,
+  "chord": "F#:min"
+ },
+ {
+  "start": 196.441,
+  "end": 199.25,
+  "chord": "N"
+ },
+ {
+  "start": 199.25,
+  "end": 200.528,
+  "chord": "A:7"
+ },
+ {
+  "start": 200.528,
+  "end": 203.802,
+  "chord": "C#:min7"
+ },
+ {
+  "start": 203.802,
+  "end": 207.215,
+  "chord": "B:maj"
+ },
+ {
+  "start": 207.215,
+  "end": 208.655,
+  "chord": "Bb:maj"
+ },
+ {
+  "start": 208.655,
+  "end": 212.648,
+  "chord": "A:maj"
+ },
+ {
+  "start": 212.648,
+  "end": 240.489,
+  "chord": "N"
+ },
+ {
+  "start": 240.489,
+  "end": 246.387,
+  "chord": "D:min"
+ },
+ {
+  "start": 246.387,
+  "end": 248.825,
+  "chord": "C:maj"
+ },
+ {
+  "start": 248.825,
+  "end": 250.474,
+  "chord": "N"
+ },
+ {
+  "start": 250.474,
+  "end": 252.842,
+  "chord": "Bb:maj"
+ },
+ {
+  "start": 252.842,
+  "end": 253.794,
+  "chord": "Eb:maj"
+ },
+ {
+  "start": 253.794,
+  "end": 257.741,
+  "chord": "D:maj"
+ },
+ {
+  "start": 257.741,
+  "end": 261.596,
+  "chord": "N"
+ },
+ {
+  "start": 261.596,
+  "end": 263.5,
+  "chord": "B:min"
+ },
+ {
+  "start": 263.5,
+  "end": 264.916,
+  "chord": "N"
+ },
+ {
+  "start": 264.916,
+  "end": 267.169,
+  "chord": "E:maj"
+ },
+ {
+  "start": 267.169,
+  "end": 269.212,
+  "chord": "A:maj"
+ },
+ {
+  "start": 269.212,
+  "end": 271.441,
+  "chord": "D:min"
+ },
+ {
+  "start": 271.441,
+  "end": 278.57,
+  "chord": "N"
+ },
+ {
+  "start": 278.57,
+  "end": 280.66,
+  "chord": "Bb:maj"
+ },
+ {
+  "start": 280.66,
+  "end": 282.448,
+  "chord": "A:maj"
+ },
+ {
+  "start": 282.448,
+  "end": 284.375,
+  "chord": "D:min"
+ },
+ {
+  "start": 284.375,
+  "end": 291.921,
+  "chord": "N"
+ },
+ {
+  "start": 291.921,
+  "end": 295.033,
+  "chord": "Bb:maj"
+ },
+ {
+  "start": 295.033,
+  "end": 315.397,
+  "chord": "N"
+ }
+]

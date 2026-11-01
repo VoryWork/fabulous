@@ -1,0 +1,8 @@
+exported/
+*.onnx
+*.ckpt
+.numba_cache/
+
+# 黄金数据里的超大滤波器组（可用 make_golden.py 重现）
+golden/cqt_filters_*.npy
+golden/cqt_filter_mag.npy

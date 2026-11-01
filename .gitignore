@@ -1,0 +1,56 @@
+# neural/ — 实验区
+# 上游仓库通过 git clone 拉取，不入库
+neural/lv-chordia/
+neural/beat_this/
+neural/all-in-one-infer/
+
+# ONNX 导出产物（可由脚本重新生成，体积大）
+neural/exported/
+*.onnx
+*.onnx.data
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 前端 / Rust（后续加入）
+node_modules/
+dist/
+target/
+src-tauri/target/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# client/ (Tauri + Vue)
+client/node_modules/
+client/dist/
+client/src-tauri/target/
+client/src-tauri/gen/
+
+# 临时产物（调试截图、一次性脚本、分析输出）
+tmp-*.ts
+tmp-*.mjs
+tmp-*.json
+tmp-*.png
+*.log
+
+# 人工截图 / 素材（体积大，不是源码）
+/*.png
+/*.html
+
+# 调试截图 / 验证图（不是源码）
+client/shots/
+neural/**/*.png
+neural/o.json
+
+# 体积大的 golden 基准（可由脚本重新生成）
+neural/exported_refrain/
+
+# 上游模型仓库（git clone 拉取）
+neural/demucs-infer/

@@ -1,0 +1,4 @@
+[tuning] 分段抖动大（可能转调），跳过整体校正: [7.1, -4.3, 1.6, 2.8, 3.3]
+[beats] 重建拍网格: 472 拍 -> 481 拍 (120 小节 x 4 拍，索引已对齐)
+Extracting spectrograms (in-memory):   0%|          | 0/1 [00:00<?, ?it/s]Extracting spectrograms (in-memory): 100%|██████████| 1/1 [00:03<00:00,  3.80s/it]Extracting spectrograms (in-memory): 100%|██████████| 1/1 [00:03<00:00,  3.80s/it]
+  0%|          | 0/1 [00:00<?, ?it/s]Analyzing 藤井风 - 何なんw (WTF lol).flac:   0%|          | 0/1 [00:00<?, ?it/s]Analyzing 藤井风 - 何なんw (WTF lol).flac: 100%|██████████| 1/1 [00:03<00:00,  3.53s/it]Analyzing 藤井风 - 何なんw (WTF lol).flac: 100%|██████████| 1/1 [00:03<00:00,  3.53s/it]

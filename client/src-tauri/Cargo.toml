@@ -1,0 +1,48 @@
+[package]
+name = "client"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 音频元信息（读时长/采样率，用于指纹与重连匹配）
+symphonia = { version = "0.5", default-features = false, features = [
+    "flac", "mp3", "aac", "isomp4", "ogg", "vorbis", "wav", "pcm",
+] }
+# SQLite（Bun 不需要，Rust 侧用 rusqlite bundled 免装 sqlite）
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 错误处理与时间
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# 进程管理（调 Python 分析）
+which = "6"
+# 内容指纹（只对文件头尾取哈希，避免读整个大文件）
+sha1 = "0.10"
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
