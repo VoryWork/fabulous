@@ -157,13 +157,35 @@ cd client/src-tauri && cargo test --lib    # Rust 92 例（含与 Python 的逐�
 | [`docs/adr/`](docs/adr/) | 架构决策记录 |
 | [`neural/patches/README.md`](neural/patches/README.md) | 上游改动约定（当前零改动） |
 
-## 版权
+## 许可与版权
 
-本仓库**不含任何音频文件**。`testdata/` 只保留分析结果（我们自己跑出来的数据），
-参考音频（藤井風的三首）需要各人通过合法渠道自备。
+**本项目代码：[MIT](LICENSE)。**
 
-模型权重来自以下开源项目，请遵守各自的许可证：
+发布包里分发的模型权重都来自 MIT 许可的开源项目，版权归各自作者：
+完整版权行、许可全文、以及全部 Rust / npm 依赖的许可清单见
+**[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)**（由 `scripts/gen-third-party.py` 生成）。
 
-- [beat_this](https://github.com/CPJKU/beat_this)（CPJKU）
-- [lv-chordia](https://github.com/openmirlab/lv-chordia)（OpenMIR）
-- [all-in-one-infer](https://github.com/openmirlab/all-in-one-infer)（OpenMIR）
+| 组件 | 用途 | 许可 | 是否随包分发 |
+|---|---|---|---|
+| [beat_this](https://github.com/CPJKU/beat_this) | 拍点 / 小节 | MIT | ✅ `beat_this_final.onnx` |
+| [lv-chordia](https://github.com/openmirlab/lv-chordia) | 和弦识别 | MIT | ✅ `chord_fold0..4.onnx` |
+| [all-in-one-infer](https://github.com/openmirlab/all-in-one-infer) | 段落结构（仅 Python 对照链路） | MIT | ❌ 权重首次运行自取 |
+| [demucs-infer](https://github.com/openmirlab/demucs-infer) | 源分离（可选） | MIT | ❌ 权重首次运行自取 |
+
+Rust 依赖里有 17 个 crate 是 **MPL-2.0**（`cssparser` 等，来自 Tauri 的 CSS 解析）。
+它们是用 crates.io 原版、未做修改，MPL 只覆盖这些文件本身，不影响本项目的 MIT 许可；
+分发二进制时按 MPL §3.2 指明源码位置即可（crate 名与版本见 NOTICE 文件）。
+
+### ⚠️ 关于训练数据
+
+`beat_this` 上游 README 有一句需要原样转达的提示：
+
+> 代码与发布的模型权重是 MIT，但**部分训练素材是完全版权作品或受限的 Creative Commons 授权**，
+> 使用者需自行评估这是否会影响自己的使用场景。
+
+我们不做二次判断，把这句话放在这里由使用者自行评估。
+
+### 音频
+
+本仓库与发布包**都不包含任何音频文件**。`testdata/` 里只有我们自己跑出来的分析结果
+（`analysis.json` 等），不含原始录音。参考音频属于各自的版权方，需要使用者自备。
