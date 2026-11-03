@@ -169,10 +169,18 @@ def render(model_licenses: dict[str, str]) -> str:
     L = []
     L.append("# 第三方组件与模型权重的许可声明")
     L.append("")
+    L.append("本项目（Fabulous）自身代码采用 [MIT 许可](LICENSE)。")
+    L.append("")
     L.append(
-        "本项目（Fabulous）自身代码的许可见 [LICENSE](LICENSE)。"
-        "下面是它所使用、分发或链接的第三方作品。"
+        "> `LICENSE` 只覆盖本项目自身的源代码。发布包里分发的模型权重是**第三方作品**，"
+        "各有自己的 MIT 许可与版权行，见下文 —— 两者不要混为一谈。"
     )
+    L.append(
+        "> （`LICENSE` 之所以只留标准 MIT 文本，是因为 GitHub 的许可识别器要求纯文本，"
+        "加注释会被判成 NOASSERTION。）"
+    )
+    L.append("")
+    L.append("下面是本项目使用、分发或链接的第三方作品。")
     L.append("")
     L.append("> 这份文件由 `scripts/gen-third-party.py` 生成，依赖变化后请重跑，不要手改。")
     L.append("")
