@@ -224,7 +224,79 @@ git -C neural/beat_this diff > neural/patches/beat_this-<一句话说明>.patch
 
 ---
 
-## 6. 新开发者 checklist
+## 6. 打包发布
+
+### 必须带 `custom-protocol` feature
+
+`tauri.conf.json` 的 `frontendDist` 依赖 `custom-protocol` 这个 feature 才能生效。
+**漏了它，连 `cargo build --release` 出来的 exe 也会去连 `http://localhost:1420`**，
+双击后窗口里是 `ERR_CONNECTION_REFUSED`（开发服务器的地址，发布机上当然没有）。
+
+```bash
+# 开发：不启用 feature，走 vite dev server
+bun run tauri dev
+
+# 发布：必须显式带上
+cd client/src-tauri
+cargo build --release --features custom-protocol
+```
+
+> 注意 `Cargo.toml` 的 `[features]` 里要保留 `custom-protocol = ["tauri/custom-protocol"]`。
+> 本项目早期精简依赖时删过一次，踩过这个坑。
+
+### 为什么不用 `tauri build`
+
+`tauri build` 在这台机器上会挂：rustc 报 `0xc0000142 STATUS_DLL_INIT_FAILED`
+（LTO + `codegen-units=1` 下的进程初始化失败）。所以走 `cargo build` + 手工装配。
+
+### 装配 zip
+
+`.onnx` 和 `onnxruntime.dll` 都不入库，要手动放进 exe 同目录：
+
+```
+musicAnaz/
+  musicAnaz.exe           前端 dist 已嵌入（6.7 MB）
+  onnxruntime.dll         19 MB
+  beat_this_final.onnx    80 MB
+  chord_fold0..4.onnx     9.5 MB（5 个文件）
+  chord_vocab_*.tsv       85 KB（3 个文件）
+```
+
+- `mel_fb.f32` 是 `include_bytes!` 编进二进制的，**不用**外置
+- `golden_*.f32` 只给测试用，**不要打包**（白占 8 MB）
+- 模型查找顺序：exe 同目录 → `exe/assets` → `MUSICANAZ_ASSETS_DIR` → 开发期 `CARGO_MANIFEST_DIR`
+
+成品约 **91 MB**（解压 114 MB）。
+
+### 验证发布包
+
+冒烟测试只有一条：双击 exe，能开窗且不报 `ERR_CONNECTION_REFUSED`，
+导入一首歌能分析出结果（启动日志应出现 `[analyzer] Rust 引擎（ONNX，自包含）`）。
+
+---
+
+## 7. 踩着过的坑
+
+### WebView2 会锁住数据目录
+
+强杀 exe 后 `%LOCALAPPDATA%\com.xmmpp.client\EBWebView` 仍被遗留的 `msedgewebview2.exe`
+占用，再启动报 `0x800700AA 请求的资源在使用中`。清理时按命令行过滤，
+**不要**杀全部 `msedgewebview2`（别的应用也在用）：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
+  Where-Object { $_.CommandLine -like '*com.xmmpp.client*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+### dev 构建慢 20~50 倍
+
+`[profile.dev]` 里的 `opt-level = 1` + 依赖包 `opt-level = 3` 不要删。
+去掉之后 CQT/chroma 从 22s 变成 >60s，看起来像卡死。
+
+---
+
+## 8. 新开发者 checklist
 
 - [ ] `bun install`，`bun run tauri dev` 能开窗
 - [ ] `client/src-tauri/assets/` 里有 6 个 `.onnx`，启动日志出现 `Rust 引擎（ONNX，自包含）`
