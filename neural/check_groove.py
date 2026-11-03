@@ -181,7 +181,7 @@ def load_song(song_id):
     base = os.path.join(os.environ["APPDATA"], "com.xmmpp.client")
     path = os.path.join(base, "songs", song_id, "analysis.json")
     a = json.load(open(path, encoding="utf-8"))
-    con = sqlite3.connect(os.path.join(base, "musicanaz.db"))
+    con = sqlite3.connect(os.path.join(base, "fabulous.db"))
     row = con.execute("select audio_path from songs where id = ?", (song_id,)).fetchone()
     con.close()
     if not row:

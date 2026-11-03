@@ -321,7 +321,7 @@ def detect_and_correct_tuning(audio_path: Path) -> dict:
         y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
         # 偏差 -34.7 → 需要 +34.7 音分；pitch_shift 的 n_steps 单位是半音
         shifted = librosa.effects.pitch_shift(y, sr=sr, n_steps=-cents / 100.0)
-        out = Path(tempfile.gettempdir()) / f"musicanaz_tuned_{abs(hash(str(audio_path)))}.wav"
+        out = Path(tempfile.gettempdir()) / f"fabulous_tuned_{abs(hash(str(audio_path)))}.wav"
         sf.write(str(out), shifted, sr)
         info["analysisPath"] = str(out)
         info["corrected"] = True

@@ -92,6 +92,46 @@ pub struct Db {
     songs_dir: PathBuf,
 }
 
+/// 老库文件名：软件叫 musicAnaz 时的名字
+const LEGACY_DB_NAME: &str = "musicanaz.db";
+/// 当前库文件名
+const DB_NAME: &str = "fabulous.db";
+
+/// 决定用哪个数据库文件，必要时把老库就地改名。
+///
+/// 软件改名那会儿库叫 `musicanaz.db`。如果直接换名字，老用户打开会看到一个
+/// **空曲库**（新库刚建出来），他们会以为数据丢了。所以这里做一次迁移。
+///
+/// 细节：
+/// - 只在新库不存在、老库存在时迁移；两边都在说明新库已经是权威数据，不动
+/// - WAL 模式的 `-wal` / `-shm` 必须跟着搬，否则最近的写入（还没 checkpoint 的）会丢
+/// - 搬不动（被占用 / 权限）就退回旧名，至少数据还在，不阻断启动
+fn migrate_db_filename(data_dir: &Path) -> PathBuf {
+    let current = data_dir.join(DB_NAME);
+    if current.exists() {
+        return current;
+    }
+    let legacy = data_dir.join(LEGACY_DB_NAME);
+    if !legacy.exists() {
+        return current; // 全新用户
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let from = data_dir.join(format!("{LEGACY_DB_NAME}{suffix}"));
+        if !from.exists() {
+            continue;
+        }
+        let to = data_dir.join(format!("{DB_NAME}{suffix}"));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            eprintln!(
+                "[db] 迁移 {LEGACY_DB_NAME}{suffix} 失败（{e}），继续使用旧文件名"
+            );
+            return legacy;
+        }
+    }
+    eprintln!("[db] 已把 {LEGACY_DB_NAME} 迁移为 {DB_NAME}");
+    current
+}
+
 impl Db {
     /// 打开（或创建）数据库
     ///
@@ -100,7 +140,7 @@ impl Db {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("无法创建数据目录: {}", data_dir.display()))?;
 
-        let db_path = data_dir.join("musicanaz.db");
+        let db_path = migrate_db_filename(data_dir);
         let conn = Connection::open(&db_path)
             .with_context(|| format!("无法打开数据库: {}", db_path.display()))?;
 
@@ -412,5 +452,55 @@ impl Db {
             }
         }
         Ok(missing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个测试用独立临时目录（并行跑不互相干扰）
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fabulous-dbtest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn fresh_install_uses_new_db_name() {
+        let d = tmp_dir("fresh");
+        let p = migrate_db_filename(&d);
+        assert_eq!(p.file_name().unwrap(), DB_NAME);
+        assert!(!p.exists(), "open() 才负责创建，这里不该凭空造文件");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn legacy_db_is_renamed_together_with_wal() {
+        let d = tmp_dir("legacy");
+        for suffix in ["", "-wal", "-shm"] {
+            std::fs::write(d.join(format!("{LEGACY_DB_NAME}{suffix}")), b"x").unwrap();
+        }
+        let p = migrate_db_filename(&d);
+        assert_eq!(p.file_name().unwrap(), DB_NAME);
+        assert!(d.join(DB_NAME).exists());
+        assert!(!d.join(LEGACY_DB_NAME).exists());
+        // -wal 没搬的话，WAL 里未 checkpoint 的事务就丢了
+        assert!(d.join(format!("{DB_NAME}-wal")).exists());
+        assert!(!d.join(format!("{LEGACY_DB_NAME}-wal")).exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn existing_new_db_wins_and_legacy_is_kept() {
+        let d = tmp_dir("both");
+        std::fs::write(d.join(DB_NAME), b"new").unwrap();
+        std::fs::write(d.join(LEGACY_DB_NAME), b"old").unwrap();
+        let p = migrate_db_filename(&d);
+        assert_eq!(p.file_name().unwrap(), DB_NAME);
+        assert_eq!(std::fs::read(&p).unwrap(), b"new", "新库是权威数据，不能被老库覆盖");
+        assert!(d.join(LEGACY_DB_NAME).exists(), "老库不要删，留给用户自己处理");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

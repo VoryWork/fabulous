@@ -1,4 +1,4 @@
-# musicAnaz — 音乐和声研究工作台
+# Fabulous — 音乐和声研究工作台
 
 把一首歌自动拆成**和弦 / 结构 / 拍点 / 歌词**四条可编辑的时间轴，用于扒带、和声分析和对齐研究。
 
@@ -39,8 +39,8 @@
 发布包解压即可运行，不需要装任何东西：
 
 ```
-musicAnaz/
-  musicAnaz.exe          前端已嵌入
+Fabulous/
+  Fabulous.exe           前端已嵌入
   onnxruntime.dll        推理运行时
   beat_this_final.onnx   拍点模型（80 MB）
   chord_fold0..4.onnx    和弦模型 5 折（9.5 MB）
@@ -65,7 +65,7 @@ bun run tauri dev
 
 ```
 %APPDATA%\com.xmmpp.client\
-  musicanaz.db             曲库索引（路径、标题、指纹）
+  fabulous.db              曲库索引（路径、标题、指纹）
   songs\<id>\
     analysis.json          模型产物：拍点 / 和弦 / 结构 / 调性
     edits.json             用户编辑层：调性覆盖 / 级数轨 / 和弦编辑 / 结构编辑 / 歌词

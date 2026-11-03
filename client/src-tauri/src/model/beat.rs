@@ -76,7 +76,7 @@ pub(crate) fn ensure_ort() -> Result<&'static ort::environment::Environment> {
     let dll = find_ort_dll()?;
     let env = ort::init_from(&dll)
         .with_context(|| format!("加载 ONNX Runtime dll 失败: {}", dll.display()))?
-        .with_name("musicAnaz")
+        .with_name("Fabulous")
         .build()
         .context("初始化 ONNX Runtime 环境失败")?;
     // 并发下可能两个线程都走到这里，`set` 失败说明别人先放了，用它的。

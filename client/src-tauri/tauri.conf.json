@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "musicAnaz",
+  "productName": "Fabulous",
   "version": "0.1.0",
   "identifier": "com.xmmpp.client",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "musicAnaz",
+        "title": "Fabulous",
         "width": 2560,
         "height": 1440,
         "minWidth": 1200,

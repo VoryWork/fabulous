@@ -42,7 +42,7 @@ def main():
     path = os.path.join(BASE, 'songs', sid, 'analysis.json')
     a = json.load(open(path, encoding='utf-8'))
 
-    con = sqlite3.connect(os.path.join(BASE, 'musicanaz.db'))
+    con = sqlite3.connect(os.path.join(BASE, 'fabulous.db'))
     row = con.execute('select audio_path from songs where id = ?', (sid,)).fetchone()
     if not row:
         print(f'找不到歌曲 {sid}')

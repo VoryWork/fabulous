@@ -254,8 +254,8 @@ cargo build --release --features custom-protocol
 `.onnx` 和 `onnxruntime.dll` 都不入库，要手动放进 exe 同目录：
 
 ```
-musicAnaz/
-  musicAnaz.exe           前端 dist 已嵌入（6.7 MB）
+Fabulous/
+  Fabulous.exe            前端 dist 已嵌入
   onnxruntime.dll         19 MB
   beat_this_final.onnx    80 MB
   chord_fold0..4.onnx     9.5 MB（5 个文件）

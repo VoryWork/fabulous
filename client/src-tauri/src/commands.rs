@@ -631,7 +631,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "musicanaz-test-{tag}-{}",
+            "fabulous-test-{tag}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

@@ -140,7 +140,7 @@ def report(sid, title):
         print("  ✅ 通过")
 
 
-con = sqlite3.connect(os.path.join(BASE, 'musicanaz.db'))
+con = sqlite3.connect(os.path.join(BASE, 'fabulous.db'))
 rows = list(con.execute("select id, title, status, error from songs"))
 print(f"DB 中共 {len(rows)} 首")
 for sid, title, status, err in rows:
