@@ -114,28 +114,33 @@ def analyze(audio_path: Path) -> dict:
     #   - 而且根音从 C#/Ab/Eb/Bb 回到 A/D/E/B，和 madmom 的调性体系一致
     #
     # 之前以为是"两个引擎差一个半音"，其实根因是这首歌不是 440Hz。
-    progress("tuning", 0.03, "检测调音偏差…")
+    progress("tuning", 0.10, "检测调音偏差…")
     tune_info = detect_and_correct_tuning(audio_path)
     result["tuning"] = tune_info
     analysis_audio = tune_info["analysisPath"] or audio_path
     if tune_info["corrected"]:
-        progress("tuning", 0.04,
+        progress("tuning", 0.13,
                  f"调音偏低 {tune_info['deviationCents']:+.0f} 音分，已校正后再分析")
     else:
-        progress("tuning", 0.04,
+        progress("tuning", 0.13,
                  f"调音偏差 {tune_info['deviationCents']:+.0f} 音分（无需校正）")
 
     # ---- 1. 拍点（beat_this）
-    progress("beats", 0.05, "识别拍点与小节…")
-    beats, downbeats = run_beats(analysis_audio, result["song"]["durationSec"])
+    # 具体进度由 `run_beats` 内部按「读音频 → mel → 推理 → 取峰」上报，
+    # 区间与 Rust 侧（analysis/mod.rs）保持一致：beats 落 0.14~0.46
+    progress("beats", 0.14, "识别拍点与小节…")
+    beats, downbeats, meter = run_beats(analysis_audio, result["song"]["durationSec"])
+    # 拍号存进 result，finalize 用它算 BPM 和 beatScale（不能再用常量 4）
+    result["meter"] = {"numerator": meter[0], "denominator": meter[1], "confidence": round(meter[2], 3)}
     result["beatsSec"] = [round(float(t), 4) for t in beats]
     result["downbeatsSec"] = [round(float(t), 4) for t in downbeats]
-    progress("beats", 0.40, f"检出 {len(beats)} 拍 / {len(downbeats)} 小节")
+    progress("beats", 0.46, f"检出 {len(beats)} 拍 / {len(downbeats)} 小节")
     # 先把网格推出去：前端可以立刻画标尺/小节线，不用干等
     push_partial(result, "beats")
 
     # ---- 2. 和弦（lv-chordia 三档）
-    progress("chords", 0.42, "识别和弦…")
+    # 进度由 `run_chords` 内部按「读音频 → CQT → 每折」上报，区间 0.48~0.80
+    progress("chords", 0.48, "识别和弦…")
     chords = run_chords(analysis_audio)
 
     # ---- 2b. madmom 交叉验证（只补候选，不覆盖 lv-chordia 的结果）
@@ -143,7 +148,7 @@ def analyze(audio_path: Path) -> dict:
     # lv-chordia 五折在某些段会全部判 N（实测两个可疑区间 18.5s / 7.7s），
     # 换权重和聚合方式都救不回来 —— 是模型本身识别不了。
     # madmom 架构完全不同，它的判断并进备选列表，用户可在检查器里选用。
-    progress("chords", 0.78, "交叉验证和弦…")
+    progress("chords", 0.82, "交叉验证和弦（madmom）…")
     try:
         mad = run_madmom(analysis_audio)
         result["madmomChords"] = mad
@@ -151,7 +156,7 @@ def analyze(audio_path: Path) -> dict:
         n_cross = sum(
             1 for segs in chords.values() for x in segs if x.get("crossEngine")
         )
-        progress("chords", 0.80,
+        progress("chords", 0.86,
                  f"检出 {len(chords.get('submission', []))} 个和弦段"
                  + (f"，{n_cross} 段由 madmom 补充候选" if n_cross else ""))
     except Exception as e:  # noqa: BLE001
@@ -182,20 +187,20 @@ def analyze(audio_path: Path) -> dict:
     push_partial(result, "chords")
 
     # ---- 3. 结构（all-in-one-infer）
-    progress("structure", 0.82, "分析歌曲结构…")
+    progress("structure", 0.88, "分析歌曲结构（all-in-one）…")
     try:
         sections = run_structure(analysis_audio)
         result["sections"] = sections
-        progress("structure", 0.94, f"识别出 {len(sections)} 个段落")
+        progress("structure", 0.97, f"识别出 {len(sections)} 个段落")
         push_partial(result, "structure")
     except Exception as e:  # noqa: BLE001
         # 结构分析失败不该让整个分析失败（拍点和和弦已经拿到了）
         sys.stderr.write(f"[structure] 跳过: {e}\n")
         result["sections"] = []
-        progress("structure", 0.94, "结构分析跳过（可选）")
+        progress("structure", 0.97, "结构分析跳过（可选）")
 
     # ---- 4. 组装 meta + 速度段 + 量化
-    progress("assemble", 0.95, "整理数据…")
+    progress("assemble", 0.98, "整理数据…")
     finalize(result)
 
     # ---- 5. 鼓组相位体检（只记录，不改网格）
@@ -575,6 +580,81 @@ def _pick_best_scale(beats, downbeats, chord_segs):
     # 插拍是在**已有点之间插**，原有 downbeat 的时刻不变，
     # 所以这里不需要重建 downbeats。
     return grid, d
+def detect_meter(beats, downbeats, default: tuple = (4, 4)) -> tuple:
+    """从拍点分布推断**拍号**，返回 `(numerator, denominator, confidence, votes)`。
+
+    ## 为什么必须检测
+
+    整个流程曾经写死 `BEATS_PER_BAR = 4`，后果是**每首歌都按 4/4 处理**：
+
+      《海蓝色圆舞曲》（6/8）beat_this 原始输出是每小节 **6 拍**
+      （拍间隔 0.320s × 6 = 1.92s = 一小节，152 小节里 81 个是 6 拍），
+      但被 `_rebuild_beats_from_downbeats(..., 4)` 强行压成 4 拍：
+      715 拍 → 489 拍、0.320s → 0.475s、BPM 93.75 → 126.32。
+
+      用户一眼看出「BPM 整体快了 3/4」（126.32 × 3/4 = 94.74）。
+
+    ## numerator：每小节拍数取**众数**
+
+    不用中位数、不用总数相除 —— 因为模型会在局部漏检/多检：
+    《海蓝色圆舞曲》的分布是 {6: 81, 3: 47, 4: 3, ...}，
+    47 个「3 拍」小节是半速误判，用中位数会被带偏，众数稳。
+
+    实测三首 4/4 的众数都很干净：
+      何なんw 4 (119/119)、特にない 4 (84/84)、満ちてゆく 4 (132/184)
+
+    ## denominator：靠分子判断，不靠 BPM 猜
+
+    同样的「拍间隔」在不同分母下能算出两个都合理的 BPM
+    （満ちてゆく 0.42s：按四分是 143、按八分是 71，两个都「正常」），
+    所以用 BPM 区间反推分母会二义。改用乐理惯例：
+
+      6/8、12/8、9/8 → 八分音符一拍（复合拍）
+      2/4、3/4、4/4 → 四分音符一拍
+      5/8、7/8      → 八分音符一拍（不规则拍）
+
+    ## confidence
+
+    众数票数占比。低于 0.5 时结果不可靠，调用方应提示用户确认。
+    """
+    import numpy as np
+    from collections import Counter
+
+    beats = np.asarray(beats, dtype=float)
+    downbeats = np.asarray(downbeats, dtype=float)
+    if len(beats) < 4 or len(downbeats) < 3:
+        return (*default, 0.0, 0)
+
+    # ---- 1) 统计每小节拍数 ----
+    counts: Counter = Counter()
+    j = 0
+    for i in range(len(downbeats) - 1):
+        k = j
+        while k < len(beats) and beats[k] < downbeats[i + 1]:
+            k += 1
+        if k > j:
+            counts[k - j] += 1
+        j = k
+    if not counts:
+        return (*default, 0.0, 0)
+
+    total = sum(counts.values())
+    numerator, votes = counts.most_common(1)[0]
+    confidence = votes / total
+
+    # 离谱的值（漏检成 1 拍、或碎片化）不采信
+    if numerator < 2 or numerator > 16:
+        return (*default, confidence, votes)
+
+    # ---- 2) 分母按乐理惯例 ----
+    if numerator in (6, 9, 12):
+        denominator = 8
+    elif numerator in (5, 7):
+        denominator = 8
+    else:
+        denominator = 4
+
+    return (numerator, denominator, confidence, votes)
 def run_beats(audio_path: Path, duration: float) -> tuple:
     """用 beat_this 识别拍点与小节。"""
     import numpy as np
@@ -587,9 +667,12 @@ def run_beats(audio_path: Path, duration: float) -> tuple:
     import soundfile as sf
 
     # 5 秒小块读，容忍尾部损坏（同 final_beat_this.py 的经验）
+    progress("beats", 0.15, "读取音频…")
     with sf.SoundFile(str(audio_path)) as f:
         sr0 = f.samplerate
+        total_frames = max(1, int(f.frames))
         chunks = []
+        read_frames = 0
         while True:
             try:
                 d = f.read(sr0 * 5, dtype="float32", always_2d=True)
@@ -598,11 +681,19 @@ def run_beats(audio_path: Path, duration: float) -> tuple:
             if len(d) == 0:
                 break
             chunks.append(d)
+            read_frames += len(d)
+            # 0.15~0.18：读盘进度（长 flac 也要几秒，别让界面死着）
+            progress(
+                "beats",
+                0.15 + 0.03 * min(1.0, read_frames / total_frames),
+                "读取音频…",
+            )
     sig = np.concatenate(chunks, axis=0)
     sig = sig.mean(axis=1) if sig.shape[1] > 1 else sig[:, 0]
     y = soxr.resample(sig, sr0, 22050) if sr0 != 22050 else sig
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    progress("beats", 0.18, "加载拍点模型…")
     model = load_model("final0", device=device)
 
     # 注意：LogMelSpect 内部的 torchaudio.MelSpectrogram 有自己的 buffer（窗函数 +
@@ -610,8 +701,12 @@ def run_beats(audio_path: Path, duration: float) -> tuple:
     #   "stft input and window must be on the same device"
     # 所以 device 要同时传给 LogMelSpect 和输入张量。
     spect = LogMelSpect(device=device)
+    progress("beats", 0.20, "计算 log-mel 谱…")
     with torch.no_grad():
         sp = spect(torch.tensor(y, dtype=torch.float32, device=device))
+        # 推理是 beat_this 内部的 chunk 循环（`split_predict_aggregate`），
+        # 第三方库没有回调口子，这里只能报"开始/结束"两个点
+        progress("beats", 0.24, "识别拍点…（分块推理）")
         pred = split_predict_aggregate(
             spect=sp, chunk_size=1500, overlap_mode="keep_first",
             border_size=6, model=model,
@@ -701,22 +796,36 @@ def run_beats(audio_path: Path, duration: float) -> tuple:
     #
     # 前奏该空着就空着：第一个真实拍就是第 1 拍。
 
+    # ---- 检测拍号（必须在重建**之前**）
+    #
+    # 重建会把每小节强行均分成固定拍数，一旦猜错就再也看不出来了：
+    # 《海蓝色圆舞曲》6/8 被压成 4/4 之后，715 拍变 489 拍，
+    # 原始 0.320s 的拍间隔彻底消失，BPM 从 93.75 变成 126.32。
+    # 所以先数「每小节实际有几拍」，再拿这个数去重建。
+    meter_num, meter_den, meter_conf, meter_votes = detect_meter(beats, downs)
+    sys.stderr.write(
+        f"[beats] 拍号推断: {meter_num}/{meter_den}"
+        f"（{meter_votes} 小节投票，置信度 {meter_conf:.0%}）" + chr(10)
+    )
+
     # 「重建前」的基线（用于统计挪动了多少个小节边界）
     before_downs = np.asarray(downs, dtype=float)
     beats, downs = _rebuild_beats_from_downbeats(
-        beats, downs, BEATS_PER_BAR, duration
+        beats, downs, meter_num, duration
     )
-    moved = int((np.abs(np.asarray(downs) - before_downs) > 1e-6).sum())
+    # 长度可能变短（曲末之外的假小节被裁掉），所以只比公共前缀
+    _n = min(len(downs), len(before_downs))
+    moved = int((np.abs(np.asarray(downs)[:_n] - before_downs[:_n]) > 1e-6).sum())
     sys.stderr.write(
         f"[beats] 重建拍网格: {before} 拍 -> {len(beats)} 拍 "
-        f"({len(downs)} 小节 x {BEATS_PER_BAR} 拍，索引已对齐)" + chr(10)
+        f"({len(downs)} 小节 x {meter_num} 拍，索引已对齐)" + chr(10)
     )
     if moved:
         sys.stderr.write(
             f"[beats] 修正了 {moved} 个小节的边界（倍速/半速检出）" + chr(10)
         )
 
-    return beats, downs
+    return beats, downs, (meter_num, meter_den, meter_conf)
 
 
 def _rebuild_beats_from_downbeats(beats, downs, beats_per_bar: int, duration: float = 0.0):
@@ -786,6 +895,22 @@ def _rebuild_beats_from_downbeats(beats, downs, beats_per_bar: int, duration: fl
                 span = med_bar * mult
             fixed.append(fixed[-1] + span)
         d = np.asarray(fixed, dtype=float)
+
+    # ---- 裁掉曲末之外的「小节」：上面的修正会**累积后移** ----
+    #
+    # 「异常小节按整数倍拉长」每命中一次，后面的小节线就整体后移一截。
+    # 实测《満ちてゆく》：原始 downbeat 末位 307.06s，修正后推到 365.7s，
+    # 而曲长只有 315.4s —— 多出来的 50 秒不是音乐内容，只是误差累积的
+    # 产物。留着它，前端谱面就比歌长（只能靠 totalTicks 截断掩盖，
+    # 表现为「谱面尾部一大片空白」）。
+    #
+    # 注意用 `duration` 而不是下面那个 `audio_end`：后者会被 `b[-1]` 收窄，
+    # 而末拍通常早于最后一条小节线（小节线是「下一个强拍」，模型往往还
+    # 没检到那里），借用它会平白砍掉最后一个真实小节。
+    if duration > 0 and len(d) > 2:
+        _kept = d[d <= float(duration)]
+        if len(_kept) >= 2:
+            d = _kept
 
     out = []
     for i in range(len(d) - 1):
@@ -887,9 +1012,12 @@ def run_chords(audio_path: Path) -> dict:
     from lv_chordia.mir import DataEntry, io
     from lv_chordia.mir.nn.network import NetworkInterface
 
+    progress("chords", 0.49, "读取音频…")
     with sf.SoundFile(str(audio_path)) as f:
         sr0 = f.samplerate
+        total_frames = max(1, int(f.frames))
         chunks = []
+        read_frames = 0
         while True:
             try:
                 d = f.read(sr0 * 5, dtype="float32", always_2d=True)
@@ -898,10 +1026,17 @@ def run_chords(audio_path: Path) -> dict:
             if len(d) == 0:
                 break
             chunks.append(d)
+            read_frames += len(d)
+            progress(
+                "chords",
+                0.49 + 0.03 * min(1.0, read_frames / total_frames),
+                "读取音频…",
+            )
     sig = np.concatenate(chunks, axis=0)
     sig = sig.mean(axis=1) if sig.shape[1] > 1 else sig[:, 0]
     y = soxr.resample(sig, sr0, 22050) if sr0 != 22050 else sig
 
+    progress("chords", 0.54, "计算 CQT 特征…")
     cqt = np.abs(
         librosa.core.hybrid_cqt(
             y, sr=22050, bins_per_octave=36, n_bins=288,
@@ -909,11 +1044,19 @@ def run_chords(audio_path: Path) -> dict:
         )
     ).T.astype(np.float32)
 
+    progress("chords", 0.62, "识别和弦（5 折推理）…")
     probs = []
-    for n in model_names():
+    names = list(model_names())
+    for i, n in enumerate(names):
         net = ChordNet(cross_subpart_counter=None, use_gpu=False)
         ni = NetworkInterface(net, n)
         probs.append(ni.inference(cqt))
+        # 每折一次：单折是整段序列一次前向，内部没有更细的口子
+        progress(
+            "chords",
+            0.62 + 0.18 * (i + 1) / max(1, len(names)),
+            f"识别和弦… 第 {i + 1}/{len(names)} 折",
+        )
 
     # ---------------------------------------------------------------- 五折聚合
     #
@@ -1233,8 +1376,23 @@ def finalize(result: dict) -> None:
 
     downbeats = np.asarray(result["downbeatsSec"], dtype=float)
     beats = np.asarray(result["beatsSec"], dtype=float)
+    # ---- 拍号（由 run_beats 检测，缺失时退回 4/4）
+    #
+    # `beatsPerBar` 是**一小节几拍**（6/8 → 6）；
+    # `quartersPerBar` 是**一小节几个四分音符**（6/8 → 3），BPM 用它算。
+    meter = result.get("meter") or {}
+    num = int(meter.get("numerator") or 4)
+    den = int(meter.get("denominator") or 4)
+    quarters_per_bar = num * 4.0 / den
+
     if len(downbeats) < 3:
-        result["meta"] = {"beatsPerBar": 4, "bpmMedian": 0, "beatCount": len(beats), "barCount": len(downbeats)}
+        result["meta"] = {
+            "beatsPerBar": num,
+            "meter": {"numerator": num, "denominator": den},
+            "bpmMedian": 0,
+            "beatCount": len(beats),
+            "barCount": len(downbeats),
+        }
         return
 
     raw_beat_ioi = float(np.median(np.diff(beats))) if len(beats) > 1 else 0.0
@@ -1251,8 +1409,8 @@ def finalize(result: dict) -> None:
     # 不做这一步会出现：一小节里只标了 2 拍，前端拍网格与小节网格差一倍，
     # 结构段（按小节画）和和弦（按拍画）整体错位。详见
     # `beat_scale_for_beats` 的注释。
-    ratio = beats_per_bar_ratio(beats, downbeats, BEATS_PER_BAR)
-    beat_scale = beat_scale_for_beats(downbeats, beats, BEATS_PER_BAR)
+    ratio = beats_per_bar_ratio(beats, downbeats, num)
+    beat_scale = beat_scale_for_beats(downbeats, beats, num)
     if beat_scale != 1.0:
         sys.stderr.write(
             f"[finalize] 拍点判定为 half-time/double-time（一小节 {ratio:.2f} 拍）"
@@ -1264,7 +1422,10 @@ def finalize(result: dict) -> None:
     result["beatsSec"] = [round(float(t), 4) for t in beats]
 
     bar_secs = np.diff(downbeats)
-    bar_bpm = BEATS_PER_BAR / bar_secs * 60
+    # BPM 是**四分音符每分钟**，与拍号解耦：
+    # 6/8 一小节 3 个四分音符、一小节 1.90s → 3/1.90*60 = 94.7
+    # （写死 4 就成了 126.3，用户看到的「BPM 整体快了 3/4」）
+    bar_bpm = quarters_per_bar / bar_secs * 60
     med_bpm = float(np.median(bar_bpm))
 
     # 速度段（阈值 5%，吸收补全引入的抖动）
@@ -1301,13 +1462,23 @@ def finalize(result: dict) -> None:
 
     result["tempoSegments"] = merged
     result["meta"] = {
-        "beatsPerBar": BEATS_PER_BAR,
-        # BPM 以**小节间隔**为准（一小节 BEATS_PER_BAR 拍）。
+        "beatsPerBar": num,
+        # 拍号单独存一份，前端按它算「一小节多少 tick」和标尺拍数
+        "meter": {
+            "numerator": num,
+            "denominator": den,
+            "confidence": meter.get("confidence", 0),
+        },
+        # BPM 以**小节间隔**为准（一小节 `quarters_per_bar` 个四分音符）。
         # 不要单独拿拍间隔算：拍点可能被整体记成 half-time，
         # 而前端的网格/结构段/和弦边界都以小节为基准，两边必须同一个数。
         "bpmMedian": round(med_bpm, 2),
-        "bpmRawBeats": round(60 / raw_beat_ioi, 2) if raw_beat_ioi > 0 else 0,
-        "bpmRawBars": round(BEATS_PER_BAR * 60 / raw_bar_ioi, 2) if raw_bar_ioi > 0 else 0,
+        # 一拍是 1/den 全音符 → 四分音符时长 = 拍时长 × den/4。
+        # （6/8 拍是八分，0.32s × 8/4 = 0.64s → 93.75 BPM，与小节口径一致）
+        "bpmRawBeats": round(60 / (raw_beat_ioi * den / 4), 2)
+        if raw_beat_ioi > 0
+        else 0,
+        "bpmRawBars": round(quarters_per_bar * 60 / raw_bar_ioi, 2) if raw_bar_ioi > 0 else 0,
         "beatScale": beat_scale,
         "barSecMedian": round(float(np.median(bar_secs)), 4),
         "beatSecMedian": round(float(np.median(np.diff(beats))), 4) if len(beats) > 1 else 0,
