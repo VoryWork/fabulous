@@ -19,7 +19,7 @@ client/                 桌面应用（Tauri 2 + Vue 3 + Rust）
     assets/             词表 + golden 基准（模型 .onnx 不入库，见下）
 neural/                 Python 侧（对照引擎 + ONNX 导出脚本）
 docs/                   开发文档与 ADR
-testdata/               参考歌曲（音频 + 分析结果 + 编辑层）
+testdata/               参考歌曲的分析结果与编辑层（音频因版权不入库）
 scripts/                开发脚本
 ```
 
@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-upstream.ps1
 |---|---|
 | [`docs/dev-setup.md`](docs/dev-setup.md) | 环境搭建、上游仓库与权重、ONNX 导出、测试 |
 | [`client/README.md`](client/README.md) | 前端结构、开发与测试命令 |
-| [`PRD_音乐和声研究工作台_v2.0_自研时间轴.md`](PRD_音乐和声研究工作台_v2.0_自研时间轴.md) | 产品需求 |
+| [`docs/PRD_音乐和声研究工作台_v2.0_自研时间轴.md`](docs/PRD_音乐和声研究工作台_v2.0_自研时间轴.md) | 产品需求 |
 | [`ROADMAP.md`](ROADMAP.md) | 里程碑 |
 | [`docs/adr/`](docs/adr/) | 架构决策记录 |
 | [`neural/patches/README.md`](neural/patches/README.md) | 上游改动约定（当前零改动） |

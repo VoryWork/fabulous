@@ -461,9 +461,22 @@ mod tests {
     #[test]
     #[ignore = "需要 ONNX 模型，手动运行"]
     fn rust_analyzer_emits_partials() {
+        // testdata 音频因版权已从仓库移除，用 MUSICANAZ_TEST_AUDIO 指定任意一首
+        let audio = std::env::var("MUSICANAZ_TEST_AUDIO")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testdata/songs/03-tokuni-nai/audio.flac")
+            });
+        if !audio.is_file() {
+            eprintln!(
+                "跳过：找不到测试音频 {}（可用 MUSICANAZ_TEST_AUDIO 指定）",
+                audio.display()
+            );
+            return;
+        }
         let a = RustAnalyzer::new().expect("模型没找齐");
-        let audio = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/songs/03-tokuni-nai/audio.flac");
 
         let mut progress: Vec<(String, f64, String)> = Vec::new();
         let mut partials: Vec<(String, String)> = Vec::new();

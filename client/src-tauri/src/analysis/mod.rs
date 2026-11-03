@@ -760,6 +760,37 @@ pub fn analyze_file_with(
 mod tests {
     use super::*;
 
+    /// 测试音频路径。
+    ///
+    /// `testdata/songs/*/audio.flac` **因版权已从仓库移除**（音乐是有版权的，
+    /// 不适合随源码分发）。所以这里可能拿不到音频：
+    ///
+    ///   - `MUSICANAZ_TEST_AUDIO=<path>` 指定任意一首歌（推荐，测试只看行为不看具体曲目）
+    ///   - 否则回退到 `testdata/songs/<dir>/audio.flac`（本地自备时才存在）
+    ///
+    /// 返回 `None` 时调用方直接 return —— 这些都是 `#[ignore]` 的手动排查工具，
+    /// 资源缺失不该让它们失败（那只会让人以为代码坏了）。
+    fn test_audio(dir: &str) -> Option<std::path::PathBuf> {
+        let p = std::env::var("MUSICANAZ_TEST_AUDIO")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testdata/songs")
+                    .join(dir)
+                    .join("audio.flac")
+            });
+        if p.is_file() {
+            Some(p)
+        } else {
+            eprintln!(
+                "跳过：找不到测试音频 {}（testdata 音频因版权未入库，可用 MUSICANAZ_TEST_AUDIO 指定）",
+                p.display()
+            );
+            None
+        }
+    }
+
     /// 打印两个时刻序列的**第一处分叉**，用于定位「拍数/小节数不一致」。
     ///
     /// 只看时刻不看数量：数量不同时，先找第一条对不上的位置，就知道差异
@@ -790,8 +821,9 @@ mod tests {
     #[test]
     #[ignore = "排查工具，手动运行"]
     fn dump_wave60() {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/songs/03-tokuni-nai/audio.flac");
+        let Some(p) = test_audio("03-tokuni-nai") else {
+            return;
+        };
         let d = audio::decode::decode_to_mono_f32(&p).unwrap();
         let y = audio::resample::resample_mono(
             &d.samples,
@@ -918,7 +950,9 @@ mod tests {
     fn rust_pipeline_matches_python() {
         let dir = std::env::var("MUSICANAZ_TEST_SONG").unwrap_or_else(|_| "03-tokuni-nai".into());
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/songs").join(&dir);
-        let audio = root.join("audio.flac");
+        let Some(audio) = test_audio(&dir) else {
+            return;
+        };
         // 期望值默认是 testdata 里的 analysis.json。
         //
         // 但仓库里的 analysis.json 是**历史产物**：Python 侧改过 detect_meter、
