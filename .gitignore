@@ -9,6 +9,18 @@ neural/exported/
 *.onnx
 *.onnx.data
 
+# 模型权重：任何格式都不入库（下载/导出物，体积大且可重新获取）
+# .gitignore 只挡未跟踪文件；已经 commit 过的仍会被跟踪，所以要靠 review 挡住。
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.sdict
+*.npy
+# neural/golden 里的 .npy 是入库的基准数据（1MB），不能挡
+!neural/golden/*.npy
+neural/weights/
+
 # Python
 __pycache__/
 *.py[cod]
