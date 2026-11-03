@@ -54,3 +54,15 @@ neural/exported_refrain/
 
 # 上游模型仓库（git clone 拉取）
 neural/demucs-infer/
+
+# 打包产物（zip 90MB+，可由打包脚本重新生成）
+dist-zip/
+
+# 目录内临时文件（调试日志 / 一次性脚本 / 验证截图）
+client/.tmp-*
+client/tmp-*
+
+# ONNX Runtime 动态库（18.9MB，从 onnxruntime 1.31.x 取，不入库）
+# 开发期：拷贝自 conda 环境的 site-packages/onnxruntime/capi/onnxruntime.dll
+# 打包期：应该作为 Tauri resource 分发
+client/src-tauri/onnxruntime.dll
