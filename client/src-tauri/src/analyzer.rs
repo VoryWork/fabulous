@@ -164,13 +164,11 @@ impl Analyzer for PythonAnalyzer {
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("无法读取分析输出"))?;
         let stderr = child.stderr.take();
 
-        /**
-         * **必须读 stderr**，否则：
-         *   1. Python 的 traceback 全丢（用户只看到"退出码 1"，无从排查）
-         *   2. stderr 管道缓冲区写满后子进程会**阻塞**（死锁）
-         *
-         * 这里起一个线程收集，失败时把尾部内容附到错误信息里。
-         */
+        // **必须读 stderr**，否则：
+        //   1. Python 的 traceback 全丢（用户只看到「退出码 1」，无从排查）
+        //   2. stderr 管道缓冲区写满后子进程会**阻塞**（死锁）
+        //
+        // 这里起一个线程收集，失败时把尾部内容附到错误信息里。
         let err_thread = stderr.map(|se| {
             std::thread::spawn(move || {
                 use std::io::Read;
@@ -192,16 +190,13 @@ impl Analyzer for PythonAnalyzer {
         let mut result: Option<String> = None;
         let mut script_error: Option<String> = None;
 
-        /**
-         * 逐行读：用 `read_until(b'
-')` + `from_utf8_lossy`，不用 `lines()`。
-         *
-         * 原因：`lines()` 遇到非 UTF-8 字节会返回 `Err`，而旧代码 `Err(_) => break`
-         * 会**静默截断整个分析结果**。模型库（madmom/demucs）偶尔往 stdout 打二进制
-         * 或乱码，一条就够让整个流程失败。
-         *
-         * lossy 解码会把坏字节替换成 U+FFFD，协议行（纯 ASCII/UTF-8）不受影响。
-         */
+        // 逐行读：用 `read_until(0x0A)` + `from_utf8_lossy`，不用 `lines()`。
+        //
+        // 原因：`lines()` 遇到非 UTF-8 字节会返回 `Err`，而旧代码 `Err(_) => break`
+        // 会**静默截断整个分析结果**。模型库（madmom/demucs）偶尔往 stdout 打二进制
+        // 或乱码，一条就够让整个流程失败。
+        //
+        // lossy 解码会把坏字节替换成 U+FFFD，协议行（纯 ASCII/UTF-8）不受影响。
         let mut buf: Vec<u8> = Vec::new();
         loop {
             buf.clear();
@@ -307,6 +302,119 @@ impl Analyzer for PythonAnalyzer {
     }
 }
 
+// ═══════════════════════════ Rust 引擎（生产） ═══════════════════════════
+
+/// 纯 Rust + ONNX 的分析引擎。**不需要 Python**，模型由 Tauri resource 随包分发。
+///
+/// 整条链在 `crate::analysis::analyze_file_with` 里：
+///
+/// ```text
+/// decode → resample(22.05k) → estimate_tuning(bpo=12)
+///   → log-mel → beat_this(ONNX) → postprocess → detect_meter
+///   → rebuild_beats_from_downbeats → finalize
+///   → hybrid_cqt(tuning) → 5 折 ChordNet(ONNX) → median → XHMM → 3 档词表
+///   → chroma + RMS → SSM 段落聚类
+/// ```
+///
+/// 与 Python 版的差异只有一处：**不做 audio pitch-shift**（tuning 直接传给 CQT），
+/// 理由见 `analysis::analyze_file_with` 里的注释。
+pub struct RustAnalyzer {
+    models: crate::analysis::ModelPaths,
+}
+
+impl RustAnalyzer {
+    /// 按「exe 同目录 → exe/assets → MUSICANAZ_ASSETS_DIR → 开发期」找模型。
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            models: crate::analysis::ModelPaths::discover()?,
+        })
+    }
+}
+
+impl Analyzer for RustAnalyzer {
+    fn analyze(
+        &self,
+        audio_path: &Path,
+        on_progress: &mut dyn FnMut(AnalysisProgress),
+    ) -> Result<AnalysisOutput> {
+        // 两个回调都会往同一个 `on_progress` 里送，只是带的字段不同：
+        // 进度事件带 pct/message，阶段性结果事件带 partial_json。
+        //
+        // 为什么套一层 `RefCell`：`analyze_file_with` 要两个 `&mut dyn FnMut`，
+        // 而它们都得改同一个 `on_progress`。裸闭包会被判定「同时可变借用」，
+        // 编译不过。`RefCell` 把借用检查推到运行时 —— 这里两个回调永远是
+        // **顺序**调用的（不会重入），所以 borrow_mut 绝不会撞车。
+        let sink = std::cell::RefCell::new(on_progress);
+        let mut progress = |stage: crate::analysis::Stage, pct: f64, msg: &str| {
+            (sink.borrow_mut())(AnalysisProgress {
+                stage: stage.as_str().to_string(),
+                pct,
+                message: msg.to_string(),
+                partial_json: None,
+            });
+        };
+        let mut partial = |stage: crate::analysis::Stage, json: String| {
+            (sink.borrow_mut())(AnalysisProgress {
+                stage: stage.as_str().to_string(),
+                // 阶段性结果不更新进度条，pct 没有意义
+                pct: 0.0,
+                message: String::new(),
+                partial_json: Some(json),
+            });
+        };
+
+        let analysis = crate::analysis::analyze_file_with(
+            audio_path,
+            &self.models,
+            &mut progress,
+            &mut partial,
+        )?;
+
+        Ok(AnalysisOutput {
+            json: serde_json::to_string(&analysis)?,
+        })
+    }
+}
+
+/// 按优先级挑分析引擎。
+///
+/// | 条件 | 用哪个 |
+/// |---|---|
+/// | `MUSICANAZ_ANALYZER=python` | Python（仅用于对照/排查）|
+/// | 模型齐全 | **Rust**（默认，自包含）|
+/// | 模型缺失但能找到脚本 | Python（开发机兜底）|
+/// | 都没有 | `None` → 上层报「分析功能不可用」|
+///
+/// 打包版里一定是第一条或第四条 —— 生产环境不该出现 Python。
+pub fn build_analyzer() -> Option<Box<dyn Analyzer>> {
+    let force_python = std::env::var("MUSICANAZ_ANALYZER")
+        .map(|v| v.eq_ignore_ascii_case("python"))
+        .unwrap_or(false);
+
+    if !force_python {
+        match RustAnalyzer::new() {
+            Ok(a) => {
+                eprintln!("[analyzer] Rust 引擎（ONNX，自包含）");
+                return Some(Box::new(a));
+            }
+            Err(e) => {
+                eprintln!("[analyzer] Rust 引擎不可用: {e}");
+            }
+        }
+    }
+
+    match PythonAnalyzer::detect() {
+        Some(a) => {
+            eprintln!("[analyzer] 回退到 Python 引擎（仅开发期）");
+            Some(Box::new(a))
+        }
+        None => {
+            eprintln!("[analyzer] 未找到可用引擎，分析功能不可用");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +448,67 @@ mod tests {
                 panic!("✗ 分析失败:\n{e}");
             }
         }
+    }
+
+    /// 端到端：Rust 引擎必须发出「进度若干条 + 三份阶段性结果」。
+    ///
+    /// 这三份 partial 是前端「边分析边渲染」的全部依据，字段缺一个前端就白屏，
+    /// 所以这里连字段一起断言。
+    ///
+    /// ```text
+    /// cargo test --release --lib analyzer::tests::rust_analyzer_emits_partials -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要 ONNX 模型，手动运行"]
+    fn rust_analyzer_emits_partials() {
+        let a = RustAnalyzer::new().expect("模型没找齐");
+        let audio = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/songs/03-tokuni-nai/audio.flac");
+
+        let mut progress: Vec<(String, f64, String)> = Vec::new();
+        let mut partials: Vec<(String, String)> = Vec::new();
+        let out = a
+            .analyze(&audio, &mut |p| match p.partial_json {
+                Some(j) => partials.push((p.stage.clone(), j)),
+                None => progress.push((p.stage.clone(), p.pct, p.message.clone())),
+            })
+            .expect("分析失败");
+
+        assert!(progress.len() >= 5, "进度事件太少: {}", progress.len());
+        let stages: Vec<&str> = partials.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(stages.len(), 3, "阶段性结果应有三份");
+        assert_eq!(stages[0], "beats");
+        assert_eq!(stages[1], "chords");
+        assert_eq!(stages[2], "structure");
+
+        for (stage, json) in &partials {
+            let parsed: crate::analysis::Analysis = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("{stage} 的 JSON 解析失败: {e}"));
+            // 拍点阶段就该有小节/拍/整体元信息，否则前端画不出网格
+            assert!(!parsed.beats_sec.is_empty(), "{stage}: 没有拍点");
+            assert!(!parsed.downbeats_sec.is_empty(), "{stage}: 没有小节线");
+            assert!(parsed.meta.bpm_median > 0.0, "{stage}: BPM 是 0");
+            assert!(parsed.meter.is_some(), "{stage}: 没有拍号");
+            assert!(!parsed.song.title.is_empty(), "{stage}: 没有标题");
+            println!(
+                "  {stage}: {} 字节, {} 拍 / {} 小节, BPM {:.2}",
+                json.len(),
+                parsed.beats_sec.len(),
+                parsed.downbeats_sec.len(),
+                parsed.meta.bpm_median
+            );
+        }
+
+        let fin: crate::analysis::Analysis =
+            serde_json::from_str(&out.json).expect("最终 JSON 解析失败");
+        assert_eq!(fin.beats_sec.len(), 337);
+        let chord_n = fin.chords.get("submission").map(|v| v.len()).unwrap_or(0);
+        assert!(chord_n > 0, "submission 档没有和弦");
+        println!(
+            "  最终: {} 拍 / {} 小节，和弦 {} 段",
+            fin.beats_sec.len(),
+            fin.downbeats_sec.len(),
+            chord_n
+        );
     }
 }

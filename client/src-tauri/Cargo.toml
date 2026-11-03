@@ -17,6 +17,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# ⚠️ 这个 feature 决定「前端是从本地 dist 嵌入」还是「连 devUrl(1420)」。
+#
+# `tauri` crate 的 build.rs 里就是一行判定：`dev = !custom_protocol`。
+# 没有它的话，**连 `cargo build --release` 出来的 exe 也会去连
+# http://localhost:1420**，启动后看到的就是「ERR_CONNECTION_REFUSED」。
+#
+# - 开发：`bun run tauri dev`（不启用本 feature，走 vite dev server）
+# - 发布：`cargo build --release --features custom-protocol`
+#
+# 官方模板默认就有它，本项目的 Cargo.toml 早期被精简时漏掉了。
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
@@ -38,6 +51,51 @@ which = "6"
 # 内容指纹（只对文件头尾取哈希，避免读整个大文件）
 sha1 = "0.10"
 
+# ---- 本地推理（Phase 2：零 Python 分发）----
+#
+# `ort` = onnxruntime 的 Rust 绑定。用 download-binaries 让构建脚本自己下
+# 对应平台的预编译 onnxruntime（Windows 下是 onnxruntime.dll，约 15MB）。
+# 目标：用户机器上不需要装 Python / PyTorch / conda。
+# ⚠️ 必须用 load-dynamic，不能用 download-binaries：
+# download-binaries 下的是**静态库**（onnxruntime.lib 360MB），它由新版 MSVC
+# 编译，链接时会缺 `__std_find_last_of_trivial_pos_1`（VS 2022 17.6 的 STL 还没有）。
+# load-dynamic 改为运行时 dlopen onnxruntime.dll，绕开 C++ STL 的 ABI 依赖，
+# 而且打包时更好控制（dll 放 resources，不塞进 exe）。
+ort = { version = "2.0.0-rc.15", features = ["load-dynamic"] }
+# FFT：log-mel（n_fft=1024）和 CQT 都要用
+rustfft = "6"
+# 重采样：rubato 是纯 Rust（无 C 依赖，便于分发），替代 Python 侧的 soxr
+# 注意：rubato 5.0 做了 API 重写（SincFixedIn 被 Async/FixedAsync 取代），
+# 这里固定用 0.15 的成熟 API —— 5.0 的文档和示例还很少，踩坑成本高。
+rubato = "0.15"
+# mel/CQT 逐帧并行（一首歌 600~20000 帧，单线程太慢）
+rayon = "1"
+
+
+# ─────────────────────────── 构建配置 ───────────────────────────
+#
+# ⚠️ dev 构建**必须**开优化，否则分析跑不完。
+#
+# cargo 的 dev profile 默认 opt-level = 0。这个项目的分析链里全是重计算：
+#   - `audio::cqt::hybrid_cqt`    逐帧 FFT（一首 5 分钟歌约 1.3 万帧）
+#   - `audio::mel`                逐帧 STFT + mel 滤波
+#   - `audio::chroma::chroma_cqt` 又一遍 CQT
+#   - `model::structure::analyze` 自相似矩阵 O(n²)（1.3 万帧 → 1.7 亿次比较）
+#
+# opt-level=0 下这些会慢 **20~50 倍**：release 里几秒的 CQT，dev 能卡几分钟，
+# 表现就是「正在分析」停在「计算 CQT 特征…」/「计算 chroma…」再也不动
+# （实测 dev 下 CQT 单阶段 > 60s，release 下 < 5s）。
+#
+# 组合取舍：
+#   - 自己的代码 opt-level = 1：编译快、保留行号，便于断点调试
+#   - 依赖（rustfft / rubato / symphonia / rayon / ort）opt-level = 3：
+#     它们吃掉绝大部分时间，而且**改自己的代码不会触发它们重编**
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

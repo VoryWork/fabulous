@@ -135,6 +135,117 @@ pub fn import_audio(state: State<'_, AppState>, path: String) -> Result<SongList
     Ok(to_list_item(&rec))
 }
 
+/// 导入 `.fbsong` 工程文件。
+///
+/// ## 为什么需要它
+///
+/// `.fbsong` 是「拿到这份文件就能完整还原一首歌」的工程格式（分析结果 +
+/// 用户编辑层）。但这个文件**不含音频**（音频是几十 MB 的 flac，不适合
+/// 塞进 JSON）。所以导入后：
+///
+///   - 谱面、和弦、结构、歌词、手改的调性 —— 全部可用
+///   - 音频缺失 → 状态标记为 `missing_audio`，列表里显示「音频失效」，
+///     点它会弹现有的「重新指定音频」对话框，选一次就能正常播放
+///
+/// 这条路复用已有的 missing_audio → reconnect 流程，不另造一套。
+#[tauri::command]
+pub fn import_fbsong(state: State<'_, AppState>, path: String) -> Result<SongListItem, String> {
+    let rec = import_fbsong_into(&db(&state), std::path::Path::new(&path))?;
+    Ok(to_list_item(&rec))
+}
+
+/// `import_fbsong` 的实体（不依赖 Tauri State，便于单测）。
+fn import_fbsong_into(db: &Db, path: &std::path::Path) -> Result<SongRecord, String> {
+    /// 工程文件比歌词大得多（含完整 analysis），但仍然不该无限读
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    let p = path.to_path_buf();
+    let meta = std::fs::metadata(&p).map_err(|e| format!("无法读取文件信息: {e}"))?;
+    if !meta.is_file() {
+        return Err("这不是一个文件".into());
+    }
+    if meta.len() > MAX_BYTES {
+        return Err(format!(
+            "文件太大（{:.1} MB），不像是 .fbsong 工程文件",
+            meta.len() as f64 / 1024.0 / 1024.0
+        ));
+    }
+
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("读取失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("不是合法的 JSON: {e}"))?;
+
+    if v.get("format").and_then(|f| f.as_str()) != Some("fbsong") {
+        return Err("这不是 .fbsong 工程文件（缺少 format 标记）".into());
+    }
+    let analysis = v
+        .get("analysis")
+        .ok_or_else(|| "工程文件里没有 analysis 内容".to_string())?;
+    if analysis.get("song").is_none() {
+        return Err("工程文件里的 analysis 缺少 song 字段".into());
+    }
+
+    let song_obj = analysis.get("song");
+    let get_str = |k: &str| {
+        song_obj
+            .and_then(|s| s.get(k))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let title = {
+        let t = get_str("title");
+        if t.is_empty() { "未命名（工程导入）".to_string() } else { t }
+    };
+    let artist = get_str("artist");
+    let duration = song_obj
+        .and_then(|s| s.get("durationSec"))
+        .and_then(|d| d.as_f64())
+        .unwrap_or(0.0);
+
+    let id = format!("song-{}", uuid_like());
+    let now = chrono::Local::now().to_rfc3339();
+
+    let rec = SongRecord {
+        id: id.clone(),
+        title,
+        artist,
+        // 工程文件不含音频：留空 → scan_missing_audio 会把它标成 missing_audio，
+        // 用户可以走已有的「重新指定音频」流程补上
+        audio_path: String::new(),
+        fingerprint: AudioFingerprint {
+            duration_sec: duration,
+            sample_rate: 0,
+            channels: 0,
+            headtail_sha1: String::new(),
+            file_size: 0,
+        },
+        status: AnalysisStatus::MissingAudio,
+        analyzed_at: Some(now.clone()),
+        error: None,
+        created_at: now,
+    };
+
+    {
+        db.insert_song(&rec)
+            .map_err(|e| format!("写入数据库失败: {e}"))?;
+        // 存 analysis 子对象（不是整个 bundle）—— 前端 load_analysis 期望的
+        // 就是 analysis.json 的格式，多包一层会让解析全错
+        db.save_analysis(&id, &analysis.to_string())
+            .map_err(|e| format!("写入分析结果失败: {e}"))?;
+        if let Some(edits) = v.get("edits") {
+            if !edits.is_null() {
+                db.save_edits(&id, &edits.to_string())
+                    .map_err(|e| format!("写入编辑层失败: {e}"))?;
+            }
+        }
+        // save_analysis 会把状态置成 done，这里改回 missing_audio
+        let _ = db.set_status(&id, AnalysisStatus::MissingAudio, None);
+    }
+
+    Ok(rec)
+}
+
 // ---------------------------------------------------------------- 分析
 
 /// 分析一首歌（**异步命令**）
@@ -440,6 +551,40 @@ pub async fn write_text_file(path: String, content: String) -> Result<(), String
     std::fs::write(&p, content).map_err(|e| format!("写入失败: {e}"))
 }
 
+/// 读一个纯文本文件（歌词导入）。
+///
+/// 路径来自前端的 `dialog.open()`（用户亲手选的），所以不做目录白名单校验。
+///
+/// 两道保险：
+///   - 超过 `MAX_TEXT_BYTES` 直接拒绝：用户可能误选了一个视频/模型文件，
+///     整个读进内存会直接把界面卡死
+///   - 非 UTF-8 的按 lossy 解码：老歌词文件常见 GBK，宁可出现几个乱码字符，
+///     也不要甩给用户一句「读取失败」
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    const MAX_TEXT_BYTES: u64 = 8 * 1024 * 1024;
+
+    let p = std::path::PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|e| format!("无法读取文件信息: {e}"))?;
+    if !meta.is_file() {
+        return Err("这不是一个文件".into());
+    }
+    if meta.len() > MAX_TEXT_BYTES {
+        return Err(format!(
+            "文件太大（{:.1} MB），不像是歌词文件",
+            meta.len() as f64 / 1024.0 / 1024.0
+        ));
+    }
+    let bytes = std::fs::read(&p).map_err(|e| format!("读取失败: {e}"))?;
+
+    // UTF-8 优先；不是 UTF-8 时用有损解码，让用户仍能看到内容
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    Ok(text)
+}
+
 // ---------------------------------------------------------------- 内部工具
 
 /// 生成一个短随机 id（不引 uuid crate，减少依赖）
@@ -450,4 +595,108 @@ fn uuid_like() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一份最小的合法 .fbsong（analysis 只放导入路径真正读的几个字段）
+    fn write_sample(dir: &std::path::Path) -> std::path::PathBuf {
+        let bundle = serde_json::json!({
+            "format": "fbsong",
+            "version": 1,
+            "exportedAt": "2026-01-01T00:00:00Z",
+            "analysis": {
+                "song": { "title": "导入测试曲", "artist": "某歌手", "durationSec": 233.5 },
+                "downbeatsSec": [0.0, 2.0, 4.0],
+                "beatsSec": [0.0, 0.5, 1.0, 1.5],
+                "chords": { "submission": [
+                    { "start": 0.0, "end": 2.0, "chord": "G:maj" }
+                ] },
+                "meta": { "beatsPerBar": 4, "meter": { "numerator": 4, "denominator": 4 } }
+            },
+            "edits": {
+                "lyricTracks": [{
+                    "id": "lyr-1",
+                    "name": "歌词",
+                    "clips": [{ "id": "ly-0", "startTick": 0, "endTick": 3840, "text": "第一句" }]
+                }]
+            }
+        });
+        let path = dir.join("sample.fbsong");
+        std::fs::write(&path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+        path
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "musicanaz-test-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn fbsong_import_restores_analysis_and_edits() {
+        let dir = temp_dir("fbsong");
+        let file = write_sample(&dir);
+        let db = Db::open(&dir).unwrap();
+
+        let rec = import_fbsong_into(&db, &file).expect("导入应成功");
+
+        // 标题 / 时长来自 analysis.song
+        assert_eq!(rec.title, "导入测试曲");
+        assert_eq!(rec.artist, "某歌手");
+        assert!((rec.fingerprint.duration_sec - 233.5).abs() < 1e-6);
+        // 工程文件不含音频 → 必须标 missing_audio，前端才能提示「音频失效」
+        assert_eq!(rec.status, AnalysisStatus::MissingAudio);
+        assert!(rec.audio_path.is_empty());
+
+        // 分析结果落库：**存的必须是 analysis 子对象**（多包一层 layer 前端就解析不了）
+        let raw = db.load_analysis(&rec.id).unwrap().expect("分析结果应已写入");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(v.get("song").is_some());
+        assert!(v.get("format").is_none(), "不应该把整个 bundle 塞进去");
+        assert_eq!(v["downbeatsSec"].as_array().unwrap().len(), 3);
+
+        // 编辑层（歌词）也要一起回来
+        let edits = db.load_edits(&rec.id).unwrap().expect("编辑层应已写入");
+        assert!(edits.contains("lyricTracks"));
+        assert!(edits.contains("第一句"));
+
+        // 可移植副本
+        assert!(dir.join("songs").join(&rec.id).join("analysis.json").is_file());
+        assert!(dir.join("songs").join(&rec.id).join("edits.json").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_non_fbsong_json() {
+        let dir = temp_dir("fbsong-bad");
+        let file = dir.join("x.json");
+        std::fs::write(&file, r#"{"format":"something-else","analysis":{}}"#).unwrap();
+        let db = Db::open(&dir).unwrap();
+
+        let err = import_fbsong_into(&db, &file).unwrap_err();
+        assert!(err.contains("fbsong"), "错误信息应指明这不是工程文件: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        let dir = temp_dir("fbsong-broken");
+        let file = dir.join("broken.fbsong");
+        std::fs::write(&file, "{ not json").unwrap();
+        let db = Db::open(&dir).unwrap();
+
+        let err = import_fbsong_into(&db, &file).unwrap_err();
+        assert!(err.contains("JSON"), "应提示 JSON 解析失败: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
