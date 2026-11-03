@@ -88,6 +88,10 @@ cargo test --lib perf_progress_probe -- --ignored --nocapture
 > `testdata/songs/*/audio.flac` **不在仓库里**（商业歌曲有版权）。少数 `#[ignore]` 的手动测试
 > 需要音频时会打印提示并跳过；要跑就用环境变量指定自己的歌：
 > `MUSICANAZ_TEST_AUDIO="D:/music/x.flac" cargo test --lib analysis::tests::dump_wave60 -- --ignored --nocapture`
+>
+> 想复现那三首的**具体数值**要自己准备原版录音（曲名/时长/放置路径见
+> [`testdata/README.md`](../testdata/README.md)「自己准备音频」），放好后跑
+> `python neural/check_testdata.py` 自检版本对不对。
 
 ⚠️ **dev 构建必须开优化**：`Cargo.toml` 里 `[profile.dev] opt-level = 1` +
 `[profile.dev.package."*"] opt-level = 3`。删掉这几行的话，CQT / chroma 会慢 20~50 倍，

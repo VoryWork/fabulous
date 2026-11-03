@@ -43,19 +43,80 @@ python -u neural/check_energy.py <song_id>
 python -u neural/check_groove.py <song_id>
 ```
 
-### 想跑需要音频的 Rust 测试
+### 自己准备音频（仓库不含）
 
-那些测试是 `#[ignore]` 的手动工具，音频缺失时会**打印提示后跳过**（不会失败）。
-用环境变量指向你自己的歌：
+音频是商业歌曲，**请通过自己的合法渠道获取**（购买的数字专辑 / 自己的 CD 抓轨等）。
+仓库只提供分析结果给你做对照。
+
+#### 需要哪三首
+
+| 目录 | 曲名 | 艺术家 | **期望时长** |
+|---|---|---|---|
+| `01-manchite-yuku/` | 満ちてゆく | 藤井風 | `5:15.387`（315.387s） |
+| `02-nannan-w/` | 何なんw (WTF lol) | 藤井风 | `5:19.973`（319.973s） |
+| `03-tokuni-nai/` | 特にない (没什么特别) | 藤井风 | `3:25.258`（205.258s） |
+
+#### 必须是同一个录音版本
+
+这是最容易踩的坑。**现场版、重制版、不同母带的时长都对不上**：
+
+```
+満ちてゆく  专辑版    315.387s   ← analysis.json 是照这个算的
+満ちてゆく  某个重制   314.8s     ← 差 0.6s，整首歌的拍点会整体错位
+```
+
+用错版本再去和 `analysis.json` 比，会得到一堆莫名其妙的差异，然后你会以为是代码改坏了。
+
+#### 放哪里
+
+```
+testdata/songs/01-manchite-yuku/audio.flac
+testdata/songs/02-nannan-w/audio.flac
+testdata/songs/03-tokuni-nai/audio.flac
+```
+
+- 文件名必须是 `audio.flac`（或者改该目录 `meta.json` 里的 `audioFile` 字段）
+- 格式：**推荐 flac 无损**。mp3/aac 也能解码，但编码本身有损，
+  和 `analysis.json` 的数值对比时可能差一点点 —— 排查代码问题时别引入这个变量
+- 采样率不限（44.1k / 48k 都行，分析链会重采样到 22050）
+
+#### 放完自检
+
+```bash
+python neural/check_testdata.py
+```
+
+它检查两件事：**在不在**、**版本对不对**（比对 `meta.json` 的 `durationSec`，差 > 0.05s 报警）。
+
+```
+[OK] 01-manchite-yuku  5:15.387  44100 Hz  藤井風 — 満ちてゆく
+[!!] 02-nannan-w  时长对不上（藤井风 — 何なんw (WTF lol)）
+    期望 5:19.973 / 实测 5:18.100 / 差 +1.873s
+    → 大概率是**另一个版本**（现场、重制、不同母带）。
+[--] 03-tokuni-nai  缺音频（藤井风 — 特にない (没什么特别)）
+    放到：testdata/songs/03-tokuni-nai/audio.flac
+```
+
+#### 只有一两首也行
+
+需要音频的 Rust 测试都是 `#[ignore]` 的手动工具，**音频缺失时会打印提示后跳过**，不会失败：
 
 ```bash
 cd client/src-tauri
-MUSICANAZ_TEST_AUDIO="D:/music/your-song.flac" cargo test --lib \
-  analysis::tests::dump_wave60 -- --ignored --nocapture
+cargo test --lib analysis::tests::dump_wave60 -- --ignored --nocapture
+# → 跳过：找不到测试音频 …（testdata 音频因版权未入库，可用 MUSICANAZ_TEST_AUDIO 指定）
 ```
 
-需要和这三首具体数值对比时（`rust_pipeline_matches_python`），
-得自己准备同名歌并放到 `testdata/songs/<目录>/audio.flac`。
+只有做「Rust 和 Python 结果是否逐值一致」这类对比（`rust_pipeline_matches_python`）时，
+才必须用上面那三首原版；平时验证代码行为，随便给一首自己的歌就够：
+
+```bash
+MUSICANAZ_TEST_AUDIO="D:/music/任意一首.flac" \
+  cargo test --lib analysis::tests::rust_pipeline_matches_python -- --ignored --nocapture
+```
+
+> 用别的歌跑这个测试时，期望值要一起换（`MUSICANAZ_TEST_EXPECT=<对应的 analysis.json>`），
+> 否则就是拿 A 歌的结果去比 B 歌。
 
 ### 想在应用里打开
 
