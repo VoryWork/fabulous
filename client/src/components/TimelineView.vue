@@ -9,7 +9,7 @@
  *
  * 尚未实现（后续 1.2.4+）：拖动、Resize、Snap、自动滚动、选区。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { COLORS, SIZES, sectionColor, trackStyle, type TrackKind } from '../timeline/design/tokens';
 import KeyPicker from './KeyPicker.vue';
 import SectionPicker from './SectionPicker.vue';
@@ -107,6 +107,18 @@ const emit = defineEmits<{
   (e: 'request-section-rename', clipId: string): void;
   /** 请求丢弃用户的结构编辑，回到模型给的结构 */
   (e: 'restore-ai-sections'): void;
+
+  /** 新建一条歌词轨（父组件弹文件选择：选了就导入 LRC，取消则建空白轨） */
+  (e: 'add-lyric-track'): void;
+  /** 删除某条歌词轨 */
+  (e: 'remove-lyric-track', id: string): void;
+  /**
+   * 歌词块编辑结果（拖动 / 拉伸 / 改名）。
+   *
+   * 和 `section-edits-change` 同一套思路：歌词是用户数据，必须按歌曲落盘，
+   * 否则重开就没了。
+   */
+  (e: 'lyric-edits-change', payload: { trackId: string; clips: LyricEditSnapshot[] }): void;
 }>();
 
 
@@ -295,7 +307,26 @@ onMounted(() => document.addEventListener('mousedown', onDocPointerDown));
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocPointerDown));
 
 /** 用 props 传入的真实数据，不再用假数据 */
-const meterMap = props.meterMap;
+/**
+ * 拍号映射 —— **必须是响应式的**。
+ *
+ * 踩过的坑：原来写 `const meterMap = props.meterMap`，只在 setup 时取一次。
+ * props 更新后这个 const 仍指向首次传入的对象，于是切到 6/8 的歌、
+ * 或者重新分析后，拍号轨、小节宽度、拍号标签全都还停在 4/4。
+ * 之前所有歌都是 4/4，所以一直没暴露。
+ */
+const meterMap = computed(() => props.meterMap);
+
+/**
+ * 一小节多少个 tick —— 由拍号算（6/8 → 2880，4/4 → 3840）。
+ *
+ * 整个组件里凡是「一小节 = 3840」的地方都必须改用它：
+ * 内容宽度、可滚动范围、小节号上限、可见范围外扩。
+ */
+const barTickCount = computed(() => {
+  const m = meterAt(meterMap.value, 0);
+  return Math.round((960 * 4) / m.denominator) * m.numerator;
+});
 
 /**
  * 顶部「拍号 tag 轨」的数据：拍号变化点。
@@ -313,7 +344,7 @@ const meterMap = props.meterMap;
  *   - 用户可以双击标签改拍号
  */
 const meterTags = computed(() =>
-  meterMap.events.map((e, i) => ({
+  meterMap.value.events.map((e, i) => ({
     key: `meter-${i}`,
     tick: e.startTick,
     label: `${e.numerator}/${e.denominator}`,
@@ -321,8 +352,12 @@ const meterTags = computed(() =>
   })),
 );
 
-/** 每小节 tick 数 */
-const BAR_TICKS = 4 * 960;
+/**
+ * 每小节 tick 数 —— 与 `barTickCount` 同一个来源（按拍号算）。
+ *
+ * 原来写死 `4 * 960`，6/8 的歌速度段位置会算错（每小节差 960 tick）。
+ */
+const BAR_TICKS = barTickCount;
 
 /**
  * 速度标记（**标签式**）。
@@ -339,7 +374,7 @@ const tempoTags = computed(() => {
   if (segs && segs.length > 0) {
     return segs.map((s, i) => ({
       key: `tempo-${i}`,
-      tick: s.startBar * BAR_TICKS,
+      tick: s.startBar * BAR_TICKS.value,
       endBar: s.endBar,
       label: s.bpm.toFixed(1),
       bpm: s.bpm,
@@ -413,9 +448,9 @@ const editing = useClipEditing({
   barStarts: () => {
     const out: number[] = [];
     const range = visibleRange(viewport.value, 0.5);
-    const first = barAt(meterMap, range.startTick);
-    const last = barAt(meterMap, range.endTick) + 1;
-    for (let b = first; b <= last; b++) out.push(tickOfBar(meterMap, b));
+    const first = barAt(meterMap.value, range.startTick);
+    const last = barAt(meterMap.value, range.endTick) + 1;
+    for (let b = first; b <= last; b++) out.push(tickOfBar(meterMap.value, b));
     return out;
   },
 });
@@ -465,6 +500,43 @@ function reportChordEdits() {
  * （见 `useClipEditing.setSectionKey`），所以这里要显式取出来 ——
  * 漏了它，用户标的段调性在切歌后就没了。
  */
+/**
+ * 歌词轨的编辑快照（回传给父组件落盘）。
+ *
+ * 只带真正需要持久化的字段：渲染用的 left/width/fg 都是派生值。
+ */
+interface LyricEditSnapshot {
+  id: string;
+  startTick: number;
+  endTick: number;
+  text: string;
+}
+
+/**
+ * 把歌词轨的编辑结果报给父组件。
+ *
+ * 为什么必须由这里报：用户的拖动只存在 `useClipEditing` 的内部快照里，
+ * **不回写** `props.tracks`（那是父组件从 edits 渲染的），只有这里知道
+ * 「用户最终看到的歌词块是什么」。
+ */
+function reportLyricEdits() {
+  const lyricTracks = props.tracks.filter((t) => t.kind === 'lyric');
+  for (const track of lyricTracks) {
+    const clips = editing.clipsByTrack.value[track.id];
+    if (!clips) continue;
+    emit('lyric-edits-change', {
+      trackId: track.id,
+      clips: clips.map((c) => ({
+        id: c.id,
+        startTick: c.startTick,
+        endTick: c.endTick,
+        // 歌词文本写在 label 上（渲染时也是读 label）
+        text: c.label,
+      })),
+    });
+  }
+}
+
 function reportSectionEdits() {
   const secTrack = props.tracks.find((t) => t.kind === 'section');
   if (!secTrack) return;
@@ -489,6 +561,7 @@ watch(
     if (editing.gesture.value.kind !== 'none') return;
     reportChordEdits();
     reportSectionEdits();
+    reportLyricEdits();
   },
   { deep: true },
 );
@@ -505,6 +578,7 @@ watch(
     if (prev !== 'none' && kind === 'none') {
       reportChordEdits();
       reportSectionEdits();
+      reportLyricEdits();
     }
   },
 );
@@ -574,6 +648,20 @@ watch(
   () => {
     editing.resetTracks(toEditableTracks(props.tracks));
   },
+  /**
+   * ⚠️ **必须 immediate**。
+   *
+   * 不加的话，组件挂载时如果 `analysisKey` 已经是稳定值（应用启动默认
+   * 选中一首歌就是这种情况），这个 watch 永远不触发 → `clipsByTrack`
+   * 一直是空的。
+   *
+   * 而渲染有兜底（`clipsFor` 里 `live ?? track.clips`），画面看起来完全
+   * 正常；但点击走 `clipsByTrack[trackId] ?? []` 得到空数组 → hitTest
+   * 返回 none → selectedId 永远是 null → 检查器一直显示「未选中片段」。
+   *
+   * 用户报的「点绝对和弦不弹详情」就是这个。
+   */
+  { immediate: true },
 );
 
 /**
@@ -584,10 +672,19 @@ watch(
  * 级数轨调性，之前所有和弦改名 / 拖动 / 删除全部丢失。
  */
 watch(
-  () => props.tracks
-    .filter((t) => t.kind === 'degree')
-    .map((t) => t.id + '@' + (t.degreeTonic ?? '') + (t.degreeMode ?? ''))
-    .join('|'),
+  // 派生轨 = 级数轨 + 歌词轨：它们都是「用户新建的附加轨」，
+  // 增删时只同步这几条，不能 resetTracks（那会清掉和弦轨的撤销历史）。
+  // 注意 key 里**不带 clips 内容**：歌词块自己的编辑走 lyric-edits-change
+  // 回写，key 变了反而会把正在编辑的内容覆盖回去。
+  () =>
+    props.tracks
+      .filter((t) => t.kind === 'degree' || t.kind === 'lyric')
+      .map((t) =>
+        t.kind === 'degree'
+          ? 'd:' + t.id + '@' + (t.degreeTonic ?? '') + (t.degreeMode ?? '')
+          : 'l:' + t.id,
+      )
+      .join('|'),
   () => {
     editing.syncDerivedTracks(toEditableTracks(props.tracks));
   },
@@ -649,7 +746,7 @@ const DEFAULT_VISIBLE_BARS = 16;
 function initViewportWith(w: number): boolean {
   if (!(w > 0)) return false;
   width.value = w;
-  const visibleTicks = tickOfBar(meterMap, DEFAULT_VISIBLE_BARS);
+  const visibleTicks = tickOfBar(meterMap.value, DEFAULT_VISIBLE_BARS);
   const ppt = Math.min(
     MAX_PIXELS_PER_TICK,
     Math.max(MIN_PIXELS_PER_TICK, w / visibleTicks),
@@ -777,10 +874,10 @@ function drawGrid() {
     ctx.strokeStyle = COLORS.gridBeat;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    const firstBar = barAt(meterMap, range.startTick);
-    const lastBar = barAt(meterMap, range.endTick);
+    const firstBar = barAt(meterMap.value, range.startTick);
+    const lastBar = barAt(meterMap.value, range.endTick);
     for (let b = firstBar; b <= lastBar; b++) {
-      for (const beatTick of beatLinesInBar(meterMap, b)) {
+      for (const beatTick of beatLinesInBar(meterMap.value, b)) {
         if (beatTick < range.startTick || beatTick > range.endTick) continue;
         const x = snapPxLine(tickToX(vp, beatTick));
         ctx.moveTo(x, 0);
@@ -798,7 +895,7 @@ function drawGrid() {
   // 它不知道这首歌有多长。空谱面（totalTicks = 0）时可见范围仍有几百小节，
   // 于是整屏铺满小节线 —— 看起来还是一首正经的歌，用户根本无法判断
   // 「这首歌还没分析」。裁剪到 totalTicks 之后，空态就是一片干净的空白。
-  const lines = barLinesInRange(meterMap, range.startTick, range.endTick).filter(
+  const lines = barLinesInRange(meterMap.value, range.startTick, range.endTick).filter(
     (line) => line.tick <= totalTicks.value,
   );
   for (const line of lines) {
@@ -869,10 +966,19 @@ function drawRuler() {
 
   const vp = viewport.value;
   const range = visibleRange(vp, 0.2);
-  const barPx = vp.pixelsPerTick * 3840;
-  const beatPx = barPx / 4;
+  /**
+   * 一小节多少 tick / 一拍多少像素 —— **必须由拍号决定**。
+   *
+   * 写死 `3840` / `/ 4` 时，6/8 的歌会被当成 4/4：
+   * 一小节实际 2880 tick 却按 3840 画，拍号也从 6 拍变 4 拍。
+   * （`meterAt` 取当前 tick 的拍号，取 0 就是全曲开头的那条）
+   */
+  const meter0 = meterAt(meterMap.value, range.startTick);
+  const barTicksHere = Math.round((960 * 4) / meter0.denominator) * meter0.numerator;
+  const barPx = vp.pixelsPerTick * barTicksHere;
+  const beatPx = barPx / meter0.numerator;
 
-  const firstBar = Math.max(0, barAt(meterMap, range.startTick) - 1);
+  const firstBar = Math.max(0, barAt(meterMap.value, range.startTick) - 1);
   /**
    * 小节号不该画到歌曲之外。
    *
@@ -880,8 +986,8 @@ function drawRuler() {
    * 标尺会出现 1、2、3……一路到几百，看着像一首超长的歌。
    * 截断到「歌曲实际最后一个小节」可以一眼看出这是空态。
    */
-  const lastBarBySong = Math.floor(totalTicks.value / 3840);
-  const lastBar = Math.min(barAt(meterMap, range.endTick) + 1, Math.max(0, lastBarBySong));
+  const lastBarBySong = Math.floor(totalTicks.value / barTickCount.value);
+  const lastBar = Math.min(barAt(meterMap.value, range.endTick) + 1, Math.max(0, lastBarBySong));
 
   // ---- 1) 弱拍刻度（最短，从底部往上 6px）
   if (beatPx >= 6) {
@@ -889,8 +995,8 @@ function drawRuler() {
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let b = firstBar; b <= lastBar; b++) {
-      const bStart = tickOfBar(meterMap, b);
-      const meter = meterAt(meterMap, bStart);
+      const bStart = tickOfBar(meterMap.value, b);
+      const meter = meterAt(meterMap.value, bStart);
       const beatTick = (960 * 4) / meter.denominator;
       for (let k = 1; k < meter.numerator; k++) {
         const t = bStart + k * beatTick;
@@ -907,27 +1013,51 @@ function drawRuler() {
    * ---- 1b) **拍号**（1 / 2 / 3 / 4）
    *
    * 只有刻度线的话，用户没法一眼判断「这个和弦落在第几拍上」。
-   * 拍是一个**时刻**，标上序号才看得出它属于小节的第几拍。
    *
-   * 数字画在**该拍的区间中点**（`x + beatPx/2`），不是压在刻度线上 ——
-   * 刻度线是拍的起点，数字代表这一整拍的位置。
+   * ## 数字必须压在刻度线上，不能画在区间中点
    *
-   * 空间不够（`beatPx < 22`）时整体隐藏：挤在一起反而看不清。
+   * 第一版把数字画在中点（`x + beatPx/2`），看着像是「小节线偏走了」——
+   * 因为用户的心智模型是「**竖线就是拍**」：第 1 拍的数字应该正好落在
+   * 小节线上，浮在两根线的正中间反而像错位了半个拍。
+   *
+   * 数字用 `textAlign = 'center'` 以竖线为轴居中，并在 `h - 15` 处
+   * （刻度线最高只到 `h - 13`），所以压线但不重叠。
+   *
+   * ## 门槛为什么从 22 降到 15
+   *
+   * 22 是按 4/4 定的。同样的缩放下 6/8 的 `beatPx` 只有 4/4 的一半：
+   * 分母从 4 变 6（÷1.5），而且一小节本身还短了 1/4（2880 vs 3840，÷1.33），
+   * 合起来正好一半 —— 于是 6/8 的标志性「1 2 3 4 5 6」刚好卡在 22 之下
+   * 被整个隐藏，只剩刻度线。用户看到的就是「6/8 没有 1~6，4/4 有 1~4」。
+   *
+   * ## 字号分三档，门槛跟着字号走
+   *
+   * 数字是单字符，宽度 ≈ 0.6 × 字号，两侧各留 2px：
+   *
+   *   字号 10（beatPx ≥ 22）→ 最小 8px
+   *   字号  9（beatPx ≥ 15）→ 最小 7px
+   *   字号  8（beatPx ≥ 11）→ 最小 7px
+   *
+   * 原先门槛 22 太保守：6/8 在 100% 缩放下 `beatPx` 只有 11~14，
+   * 结果「1 2 3 4 5 6」整排消失，只剩刻度线。
    */
-  if (beatPx >= 22) {
+  const beatFontPx = beatPx >= 22 ? 10 : beatPx >= 15 ? 9 : 8;
+  const MIN_BEAT_LABEL_PX = 11;
+  if (beatPx >= MIN_BEAT_LABEL_PX) {
     ctx.fillStyle = COLORS.textMuted;
-    ctx.font = `500 10px system-ui, -apple-system, sans-serif`;
+    ctx.font = `500 ${beatFontPx}px system-ui, -apple-system, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
     const labelY = h - 15;
     for (let b = firstBar; b <= lastBar; b++) {
-      const bStart = tickOfBar(meterMap, b);
-      const meter = meterAt(meterMap, bStart);
+      const bStart = tickOfBar(meterMap.value, b);
+      const meter = meterAt(meterMap.value, bStart);
       const beatTick = (960 * 4) / meter.denominator;
       for (let k = 0; k < meter.numerator; k++) {
         const t = bStart + k * beatTick;
         if (t < range.startTick || t > range.endTick) continue;
-        const x = snapPxLine(tickToX(vp, t)) + beatPx / 2;
+        // 压在拍起点（= 刻度线）上，不是拍区间中点
+        const x = snapPxLine(tickToX(vp, t));
         if (x < -20 || x > w + 20) continue;
         // 第 1 拍加粗一点：它是小节的锚点
         ctx.fillStyle = k === 0 ? COLORS.textSecondary : COLORS.textMuted;
@@ -939,10 +1069,12 @@ function drawRuler() {
 
   // ---- 2) 小节刻度（强拍，11px）+ 小节号
   const step = barPx < 14 ? 8 : barPx < 28 ? 4 : barPx < 56 ? 2 : 1;
+  // 小节号以小节线为轴居中（否则数字永远挂在线右边，越往右越像「偏走了」）
+  ctx.textAlign = 'center';
 
   for (let b = firstBar; b <= lastBar; b++) {
-    const tick = tickOfBar(meterMap, b);
-    if (tick < range.startTick - 3840 || tick > range.endTick + 3840) continue;
+    const tick = tickOfBar(meterMap.value, b);
+    if (tick < range.startTick - barTickCount.value || tick > range.endTick + barTickCount.value) continue;
     const x = snapPxLine(tickToX(vp, tick));
     if (x < -40 || x > w + 40) continue;
 
@@ -962,9 +1094,17 @@ function drawRuler() {
       ctx.fillStyle = isGroup ? COLORS.textPrimary : COLORS.textMuted;
       ctx.font = `${isGroup ? '600 ' : '400 '}${SIZES.rulerFont} system-ui, -apple-system, sans-serif`;
       ctx.textBaseline = 'top';
-      ctx.fillText(String(b + 1), x + 4, 3);
+      /**
+       * 小节号以**小节线为轴居中**（不是 `x + 4` 左对齐）。
+       *
+       * 左对齐时数字永远挂在线右边，小节越往右看越像「偏走了」；
+       * 居中之后它和下方拍号的 `1` 落在同一条竖线上，一眼就对得上。
+       */
+      ctx.fillText(String(b + 1), x, 3);
     }
+
   }
+  ctx.textAlign = 'start';
 
   // ---- 3) 底部基线
   ctx.strokeStyle = COLORS.border;
@@ -1014,20 +1154,20 @@ watch([viewport, () => props.playheadTick], scheduleDraw, { deep: true });
 /** 内容总像素宽（含一点右侧留白，让最后一小节不贴边） */
 const contentPx = computed(() => {
   const vp = viewport.value;
-  return (totalTicks.value + 3840 * 2) * vp.pixelsPerTick;
+  return (totalTicks.value + barTickCount.value * 2) * vp.pixelsPerTick;
 });
 
 /** 可滚动的最大 scrollTick */
 const maxScrollTick = computed(() => {
   const vp = viewport.value;
   const visibleTicks = vp.width / vp.pixelsPerTick;
-  return Math.max(0, totalTicks.value + 3840 * 2 - visibleTicks);
+  return Math.max(0, totalTicks.value + barTickCount.value * 2 - visibleTicks);
 });
 
 /** 把 scrollTick 夹到合法范围 */
 function clampViewport(vp: Viewport): Viewport {
   const visibleTicks = vp.width / vp.pixelsPerTick;
-  const maxScroll = Math.max(0, totalTicks.value + 3840 * 2 - visibleTicks);
+  const maxScroll = Math.max(0, totalTicks.value + barTickCount.value * 2 - visibleTicks);
   const t = Math.min(Math.max(0, vp.scrollTick), maxScroll);
   return t === vp.scrollTick ? vp : { ...vp, scrollTick: t };
 }
@@ -1203,6 +1343,30 @@ function onTrackPointerDown(e: PointerEvent, track: RealTrack) {
 
   const contentEl = contentRef.value;
   if (!contentEl) return;
+
+  /**
+   * 点击时间轴 = 离开右侧面板的输入框。
+   *
+   * ## 不这么做会「删除快捷键失灵」
+   *
+   * 用户在检查器里改完歌词文本 / 和弦名后，焦点还留在那个 `<input>` 里。
+   * 这时去点一个块、再按 Delete：按键其实进了输入框（删掉的是框里的字符），
+   * 用户看到的是「块没被删掉，快捷键坏了」。
+   *
+   * 同类的输入框守卫在 `App.vue` 的全局快捷键和 `SongLibrary` 里都有，
+   * 时间轴这边原来漏了。
+   */
+  const active = document.activeElement as HTMLElement | null;
+  if (
+    active &&
+    active !== document.body &&
+    (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
+  ) {
+    active.blur();
+  }
+  // 让容器拿到焦点：后续快捷键（Delete / Ctrl+Z / S / J）都作用于时间轴
+  contentEl.focus({ preventScroll: true });
+
   const rect = contentEl.getBoundingClientRect();
   const x = e.clientX - rect.left;
 
@@ -1254,6 +1418,71 @@ interface CtxState {
 const ctxMenu = ref<CtxState | null>(null);
 
 /** 正在改名的结构段 id（弹字典选择器） */
+/**
+ * 删除「整条用户轨道」（级数轨 / 歌词轨）的确认弹层。
+ *
+ * ## 为什么要确认
+ *
+ * 这两类轨是**用户自己建的数据**，删掉不进撤销历史（它们不是编辑层的
+ * clips，而是父组件 edits 里的一整条记录）：
+ *   - 歌词轨：导进来的几十句歌词直接没了，要重新找 LRC 再导一次
+ *   - 级数轨：要重新加一条并重设调性
+ *
+ * 轨道头上的 `×` 很小、又紧挨着调性徽章，误触代价却是整轨丢失。
+ * 用项目里已有的 sec-mask / sec-pop 弹层样式，保持视觉一致。
+ */
+type TrackConfirm = {
+  action: 'remove-degree' | 'remove-lyric' | 'clear-lyric';
+  id: string;
+  name: string;
+};
+const trackConfirm = shallowRef<TrackConfirm | null>(null);
+
+const trackConfirmText = computed(() => {
+  const c = trackConfirm.value;
+  if (!c) return { title: '', desc: '', ok: '删除' };
+  if (c.action === 'remove-degree') {
+    return {
+      title: `删除「${c.name}」？`,
+      desc: '这条级数轨会被移除。和弦、结构不受影响，之后可以再添加。',
+      ok: '删除轨道',
+    };
+  }
+  if (c.action === 'clear-lyric') {
+    return {
+      title: `清空「${c.name}」的所有歌词？`,
+      desc: '轨道会保留，但里面每一句都会被删掉（不进撤销历史）。',
+      ok: '清空',
+    };
+  }
+  return {
+    title: `删除「${c.name}」？`,
+    desc: '这条歌词轨和里面的所有句子都会被删除，重新使用需要再次导入 LRC。',
+    ok: '删除轨道',
+  };
+});
+
+function requestRemoveTrack(t: RealTrack) {
+  if (t.kind !== 'degree' && t.kind !== 'lyric') return;
+  trackConfirm.value = {
+    action: t.kind === 'degree' ? 'remove-degree' : 'remove-lyric',
+    id: t.id,
+    name: t.name || (t.kind === 'degree' ? '级数轨' : '歌词轨'),
+  };
+}
+
+function confirmTrackAction() {
+  const c = trackConfirm.value;
+  trackConfirm.value = null;
+  if (!c) return;
+  if (c.action === 'remove-degree') emit('remove-degree-track', c.id);
+  else if (c.action === 'remove-lyric') emit('remove-lyric-track', c.id);
+  else if (c.action === 'clear-lyric') {
+    const ids = (editing.clipsByTrack.value[c.id] ?? []).map((x) => x.id);
+    for (const cid of ids) editing.deleteClip(cid);
+  }
+}
+
 const sectionRenameFor = ref<string | null>(null);
 /** 正在设调性的结构段 id（弹 KeyPicker） */
 const sectionKeyFor = ref<string | null>(null);
@@ -1341,6 +1570,32 @@ const menuItems = computed<MenuItem[]>(() => {
     return sectionMenuItems(!!st.clipId);
   }
 
+  /**
+   * 歌词轨。
+   *
+   * 为什么需要专用菜单：导入 LRC 时片头那一大堆「作词 / 编曲 / 和声 /
+   * 第一小提琴 / OP / 版权声明」**无法自动判断**（白名单永远列举不完），
+   * 用户的处理方式就是「选中 → 删掉」。而通用和弦菜单里的
+   * 「编辑和弦名 / 用其它档位重新分析」对歌词毫无意义。
+   */
+  if (ctxTrack.value?.kind === 'lyric') {
+    if (!st.clipId) {
+      return [
+        { id: 'lyr-create', label: '在此新建一句歌词' },
+        { id: 'divider-1', label: '', divider: true },
+        { id: 'lyr-clear', label: '清空本轨', danger: true },
+      ];
+    }
+    return [
+      { id: 'lyr-rename', label: '在右侧改文本', shortcut: 'Enter' },
+      { id: 'divider-1', label: '', divider: true },
+      { id: 'split', label: '在此拆分', shortcut: 'S' },
+      { id: 'merge', label: '合并到下一句', shortcut: 'J' },
+      { id: 'divider-2', label: '', divider: true },
+      { id: 'delete', label: '删除这句', shortcut: 'Del', danger: true },
+    ];
+  }
+
 
   if (!st.clipId) {
     return [
@@ -1421,6 +1676,31 @@ function onMenuSelect(id: string) {
     ctxMenu.value = null;
     return;
   }
+  // ---- 歌词轨专用操作
+  if (id === 'lyr-create') {
+    // 默认一小节宽：歌词一句通常就是这个量级，太短的话用户还得再拖
+    editing.createAt(st.trackId, st.tick, '新词', BAR_TICKS.value);
+    ctxMenu.value = null;
+    return;
+  }
+  if (id === 'lyr-rename') {
+    // 真正的输入框在右侧检查器（这套 UI 统一「改名走右侧」，
+    // 不做就地编辑）。这里只负责选中，让检查器切到这一块。
+    if (st.clipId) editing.selectedId.value = st.clipId;
+    ctxMenu.value = null;
+    return;
+  }
+  if (id === 'lyr-clear') {
+    const track = props.tracks.find((t) => t.id === st.trackId);
+    trackConfirm.value = {
+      action: 'clear-lyric',
+      id: st.trackId,
+      name: track?.name?.trim() || '歌词',
+    };
+    ctxMenu.value = null;
+    return;
+  }
+
   if (id.startsWith('reanalyze-')) {
     currentDictionary.value = id.slice('reanalyze-'.length) as 'submission' | 'ismir2017' | 'full';
     ctxMenu.value = null;
@@ -1522,8 +1802,41 @@ function onTrackDoubleClick(e: MouseEvent, track: RealTrack) {
   editing.createAt(track.id, tick, track.kind === 'chord' ? 'N' : '新');
 }
 
-/** 键盘：Escape 取消手势，Delete 删除选中，Ctrl+Z/Y 撤销重做 */
+/**
+ * 键盘：Escape 取消手势，Delete 删除选中，Ctrl+Z/Y 撤销重做。
+ *
+ * ## 必须放过输入框
+ *
+ * 这个监听挂在 `window` 上（时间轴本身不是可聚焦元素，挂在根节点收不到
+ * 焦点在 body 时的按键）。代价是**右侧检查器里的输入框也会命中这里**：
+ *
+ *   - 在歌词/和弦输入框里按 Delete → 块被删掉，而用户只是想删一个字
+ *   - 在输入框里按 Ctrl+Z → 编辑层撤销一次（输入框自己也撤销一次，双份）
+ *
+ * 所以输入框内的按键一律不处理，只留 Escape（退出编辑）。
+ */
 function onKeyDown(e: KeyboardEvent) {
+  const t = e.target as HTMLElement | null;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+    if (e.key === 'Escape') t.blur();
+    return;
+  }
+
+  /**
+   * 有弹层时**屏蔽所有时间轴快捷键**。
+   *
+   * 否则「确认删除整轨」的对话框开着，按 Delete / S / J 依然会作用到
+   * 时间轴上的块 —— 用户在弹层上按键，改的却是背后的谱面。
+   */
+  if (trackConfirm.value || sectionRenameFor.value || sectionKeyFor.value) {
+    if (e.key === 'Escape') {
+      trackConfirm.value = null;
+      sectionRenameFor.value = null;
+      sectionKeyFor.value = null;
+    }
+    return;
+  }
+
   if (e.key === 'Escape') {
     editing.cancelGesture();
     return;
@@ -1544,6 +1857,24 @@ function onKeyDown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
     editing.redo();
     e.preventDefault();
+    return;
+  }
+
+  // ---- 右键菜单里标了这四个快捷键，就得真的能用 ----
+  // （之前菜单写着 S / J，键盘却毫无反应 —— 标注比没标注更坑）
+  const sel = editing.selectedId.value;
+  if (!sel || e.ctrlKey || e.metaKey || e.altKey) return;
+  switch (e.key.toLowerCase()) {
+    case 's':
+      editing.splitAt(sel, props.playheadTick ?? 0);
+      e.preventDefault();
+      break;
+    case 'j':
+      editing.mergeWithNext(sel);
+      e.preventDefault();
+      break;
+    default:
+      break;
   }
 }
 
@@ -1614,6 +1945,33 @@ function sectionKeyAt(tick: number): { tonic: string; mode: 'major' | 'minor' } 
     }
   }
   return found;
+}
+
+/**
+ * 这块和弦是不是「模型自己也没把握」。
+ *
+ * ## 为什么不能只看 confidence 阈值
+ *
+ * 原来固定 `< 0.25` 才提示圆点。实测《満ちてゆく》里普遍存在 0.28~0.49
+ * 的块（正常段是 0.6~0.74），阈值 0.25 一条都标不出来。
+ *
+ * 但直接把阈值提到 0.5 会标掉近一半的块 —— 因为**短块置信度天然就低**
+ * （一两个八分音符只有几帧数据，模型本来就算不准）。
+ *
+ * ## 判据：长块 + 低置信度
+ *
+ * 一块持续了 1.5 小节以上，模型却没什么把握 —— 那最可能的情况是
+ * **该切的地方没切**（把两段不同的和声吞成一段）。实测案例：
+ *
+ *   27.61-33.69s  A:maj  conf=0.41  ← 横跨 2 小节，实际第二小节是 C#:min
+ *
+ * 三个词典档位 + madmom 都判 A:maj，所以连备选里也没有 C#:min，
+ * 用户只能手动改 —— 至少要先让他看见「这块可疑」。
+ */
+function isLowConfidence(c: RenderedClip): boolean {
+  if (c.confidence == null) return false;
+  const bars = (c.endTick - c.startTick) / BAR_TICKS.value;
+  return bars >= 1.5 ? c.confidence < 0.5 : c.confidence < 0.25;
 }
 
 function clipsFor(track: RealTrack): RenderedClip[] {
@@ -1903,7 +2261,7 @@ const zoomPercent = computed(() => {
   // width = 0 表示布局还没完成，此时算不出有意义的百分比。
   // 不做守卫的话 base = 0 → 结果是 Infinity/NaN，滑块会跳到一个荒唐值。
   if (!(width.value > 0)) return 100;
-  const base = width.value / tickOfBar(meterMap, DEFAULT_VISIBLE_BARS);
+  const base = width.value / tickOfBar(meterMap.value, DEFAULT_VISIBLE_BARS);
   if (!(base > 0)) return 100;
   return Math.round((viewport.value.pixelsPerTick / base) * 100);
 });
@@ -1922,7 +2280,7 @@ const zoomPercentRef = zoomPercent;
 /** 设置到指定百分比（滑块用） */
 function setZoomPercent(pct: number) {
   if (!(width.value > 0)) return; // 布局未完成，无法按百分比定位
-  const base = width.value / tickOfBar(meterMap, DEFAULT_VISIBLE_BARS);
+  const base = width.value / tickOfBar(meterMap.value, DEFAULT_VISIBLE_BARS);
   const target = Math.max(1, pct) * 0.01 * base;
   const ppt = Math.max(MIN_PIXELS_PER_TICK, Math.min(MAX_PIXELS_PER_TICK, target));
   // 以视口中心为锚点
@@ -2040,13 +2398,30 @@ defineExpose({
             </svg>
           </span>
           <div class="header-main">
-            <div class="header-name">{{ t.name }}</div>
+            <div class="header-top">
+              <div class="header-name">{{ t.name }}</div>
+              <!--
+                歌词轨的删除按钮放**主行**右侧。
+                以前跟着级数轨一起放副行，但歌词轨副行没有别的内容
+                （没有层说明、没有调性徽章），于是整条轨只剩一个孤零零的
+                × 挂在第二行 —— 看起来像排版掉了。
+                级数轨仍放副行：它副行有「层说明 + 调性徽章」，塞不下主行。
+              -->
+              <button
+                v-if="!readonly && t.kind === 'lyric'"
+                class="track-remove"
+                title="删除这条歌词轨"
+                @click="requestRemoveTrack(t)"
+              >
+                ×
+              </button>
+            </div>
             <!--
               副标题行：级数轨的调性徽章 + 删除按钮放这里，不放主行。
               轨道头总共只有 148px：主行塞「名字 + 徽章 + ×」会把名字挤成
               「级...」（实测就是这样）。
             -->
-            <div class="header-sub">
+            <div v-if="trackLayerOf(t) || degreeTrackKeyOf(t.id)" class="header-sub">
               <span v-if="trackLayerOf(t)" class="header-layer">{{ trackLayerOf(t) }}</span>
               <template v-if="degreeTrackKeyOf(t.id)">
                 <button
@@ -2061,7 +2436,7 @@ defineExpose({
                   v-if="!readonly"
                   class="track-remove"
                   title="删除这条级数轨"
-                  @click="emit('remove-degree-track', t.id)"
+                  @click="requestRemoveTrack(t)"
                 >
                   ×
                 </button>
@@ -2083,6 +2458,21 @@ defineExpose({
         >
           <span class="add-track-plus">+</span>
           <span>添加级数轨</span>
+        </button>
+
+        <!--
+          添加歌词轨。
+          点击会先弹文件选择：选中 LRC 就按时间戳导入，取消则建一条空白轨
+          （用户可以在时间轴上双击手动加句）。
+        -->
+        <button
+          v-if="!readonly"
+          class="add-track"
+          title="导入 LRC 歌词（点取消则创建一条空白歌词轨）"
+          @click="emit('add-lyric-track')"
+        >
+          <span class="add-track-plus">+</span>
+          <span>添加歌词轨</span>
         </button>
       </div>
 
@@ -2184,9 +2574,9 @@ defineExpose({
                 让用户一眼看出"哪几个和弦模型自己也没把握"。
               -->
               <span
-                v-if="c.confidence != null && c.confidence < 0.25"
+                v-if="isLowConfidence(c)"
                 class="state-dot low-conf"
-                :title="`模型置信度较低 ${Math.round(c.confidence * 100)}%，建议核对`"
+                :title="`模型置信度较低 ${Math.round((c.confidence ?? 0) * 100)}%，建议核对`"
               />
               <!-- 左右手柄（可拖拽的视觉提示） -->
               <!--
@@ -2226,6 +2616,24 @@ defineExpose({
       留在原地的 fixed 定位会失真。
     -->
     <Teleport to="body">
+      <!-- 删除整轨 / 清空歌词的确认 -->
+      <div
+        v-if="trackConfirm"
+        class="sec-mask"
+        @click.self="trackConfirm = null"
+      >
+        <div class="sec-pop confirm-pop">
+          <div class="confirm-title">{{ trackConfirmText.title }}</div>
+          <div class="confirm-desc">{{ trackConfirmText.desc }}</div>
+          <div class="confirm-actions">
+            <button class="confirm-btn" @click="trackConfirm = null">取消</button>
+            <button class="confirm-btn danger" @click="confirmTrackAction">
+              {{ trackConfirmText.ok }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div
         v-if="sectionRenameFor"
         class="sec-mask"
@@ -2501,6 +2909,17 @@ defineExpose({
   flex: 1;
   min-width: 0;
 }
+/* 主行：名字占满，右侧留给删除按钮（只有歌词轨有） */
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.header-top .header-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .header-name {
   font-size: 12px;
   color: var(--text-primary);
@@ -2547,6 +2966,12 @@ defineExpose({
   overflow: hidden;
   background: var(--bg-track);
   cursor: default;
+}
+/* 点击轨道会把焦点收到这里（见 onTrackPointerDown），
+   浏览器默认的焦点描边在这套界面里非常突兀，去掉 */
+.content:focus,
+.content:focus-visible {
+  outline: none;
 }
 .grid-canvas {
   position: absolute;
@@ -2887,6 +3312,55 @@ defineExpose({
  * 之前这里写的是 `--panel`（不存在的变量）+ 深色 fallback，
  * 于是弹出来一个黑框，和整个界面完全不搭。
  */
+/* ---- 确认弹层（删除整轨 / 清空歌词） ---- */
+.confirm-pop {
+  width: 320px;
+  padding: 16px 18px 14px;
+  border-radius: 8px;
+}
+.confirm-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #1a1a1a);
+  margin-bottom: 8px;
+}
+.confirm-desc {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-secondary, #6b6b6e);
+  margin-bottom: 16px;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.confirm-btn {
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: 0;
+  color: var(--text-secondary, #6b6b6e);
+  background: transparent;
+  border: 1px solid var(--border, #e5e5e5);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.confirm-btn:hover {
+  color: var(--text-primary, #1a1a1a);
+  border-color: var(--border-strong, #d4d4d4);
+  background: var(--bg-hover, #f0f1f1);
+}
+.confirm-btn.danger {
+  color: #fff;
+  background: var(--danger, #e5484d);
+  border-color: var(--danger, #e5484d);
+}
+.confirm-btn.danger:hover {
+  background: #d13b40;
+  border-color: #d13b40;
+  color: #fff;
+}
+
 .sec-mask {
   position: fixed;
   inset: 0;

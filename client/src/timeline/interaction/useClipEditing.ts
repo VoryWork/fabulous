@@ -97,7 +97,10 @@ export function useClipEditing(opt: UseClipEditingOptions) {
    * 不能靠 `trackKindById`，那是 setup 时快照，新增的级数轨不在里面。
    */
   let previousDegreeIds = new Set(
-    opt.tracks.filter((t) => t.kind === 'degree').map((t) => t.id),
+    // 派生轨 = 级数轨 + 歌词轨（用户新建的附加轨），增删走 syncDerivedTracks
+    opt.tracks
+      .filter((t) => t.kind === 'degree' || t.kind === 'lyric')
+      .map((t) => t.id),
   );
 
   // ---- 选择 ----
@@ -654,7 +657,9 @@ export function useClipEditing(opt: UseClipEditingOptions) {
     gesture.value = IDLE_CONTEXT;
     history.value = createHistory(100);
     previousDegreeIds = new Set(
-      tracks.filter((t) => t.kind === 'degree').map((t) => t.id),
+      tracks
+        .filter((t) => t.kind === 'degree' || t.kind === 'lyric')
+        .map((t) => t.id),
     );
   }
 
@@ -681,7 +686,7 @@ export function useClipEditing(opt: UseClipEditingOptions) {
     const next = { ...clipsByTrack.value };
     const degreeIds = new Set<string>();
     for (const t of tracks) {
-      if (t.kind !== 'degree') continue;
+      if (t.kind !== 'degree' && t.kind !== 'lyric') continue;
       degreeIds.add(t.id);
       next[t.id] = t.clips.map<ClipState>((c) => ({
         ...c,

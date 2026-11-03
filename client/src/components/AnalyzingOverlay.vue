@@ -56,8 +56,11 @@
         </div>
       </div>
 
-      <!-- 文案 -->
-      <div class="ao-msg">{{ message }}</div>
+      <!-- 文案 + 已用时（阶段内部长时间没进度时，这个数字在动 = 没死） -->
+      <div class="ao-foot">
+        <span class="ao-msg">{{ message }}</span>
+        <span v-if="elapsedMs" class="ao-elapsed">{{ elapsedText }}</span>
+      </div>
 
       <!-- 切走提示：用户不知道「可以切到别的歌」会干等 -->
       <div class="ao-hint">
@@ -84,6 +87,8 @@ const props = defineProps<{
    * 有拍点就说明 beats 那段跑完了 —— 用它点亮阶段条。
    */
   doneStages?: string[];
+  /** 本次分析已用时（毫秒）。阶段内部没进度时，这个数字在涨就是"还活着"。 */
+  elapsedMs?: number;
 }>();
 
 /**
@@ -92,10 +97,18 @@ const props = defineProps<{
  * 顺序和后端一致（analyze_song.py）：tuning → beats → chords → structure。
  * tuning 很快且大多数歌不需要校正，不单独占一条，并进 beats 一起显示。
  */
+/**
+ * 三个主阶段，**区间必须和后端 `analyze_file_with` 里的 pct 对齐**：
+ *
+ *   probe+tuning 0.00–0.14 → beats 0.14–0.46 → chords 0.46–0.87 → structure 0.87–0.97
+ *
+ * 第一段把「读音频 / 调音」也算进去（用户视角那就是"节拍阶段在准备"），
+ * 否则一开始三条都空着、主进度条却已经动了一点，看着像错位。
+ */
 const STAGE_DEFS = [
-  { key: 'beats', label: '节拍', weight: 0.35 },
-  { key: 'chords', label: '和弦', weight: 0.45 },
-  { key: 'structure', label: '结构', weight: 0.2 },
+  { key: 'beats', label: '节拍', from: 0, to: 0.46 },
+  { key: 'chords', label: '和弦', from: 0.46, to: 0.87 },
+  { key: 'structure', label: '结构', from: 0.87, to: 0.98 },
 ] as const;
 
 const done = computed(() => new Set(props.doneStages ?? []));
@@ -111,15 +124,15 @@ const done = computed(() => new Set(props.doneStages ?? []));
 const stages = computed(() => {
   const p = Math.max(0, Math.min(1, props.pct || 0));
   const out: { key: string; label: string; state: string; pct: number }[] = [];
-  let consumed = 0;
   for (const d of STAGE_DEFS) {
     const isDone = done.value.has(d.key);
-    const started = p > consumed;
-    // 该阶段内部的进度：把总进度落在这一段的区间里
+    const started = p >= d.from;
+    // 阶段内进度 = 总进度落在 [from, to] 里的比例
+    const span = d.to - d.from;
     const local = isDone
       ? 1
       : started
-        ? Math.max(0, Math.min(1, (p - consumed) / d.weight))
+        ? Math.max(0, Math.min(1, (p - d.from) / span))
         : 0;
     out.push({
       key: d.key,
@@ -127,9 +140,17 @@ const stages = computed(() => {
       state: isDone ? 'done' : started ? 'running' : 'pending',
       pct: local,
     });
-    consumed += d.weight;
   }
   return out;
+});
+
+/** 已用时文案：<10s 显示一位小数，超过 1 分钟显示 m:ss */
+const elapsedText = computed(() => {
+  const ms = props.elapsedMs ?? 0;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${total}s`;
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 });
 
 const pct = computed(() => Math.max(0, Math.min(1, props.pct || 0)));
@@ -250,6 +271,19 @@ const pct = computed(() => Math.max(0, Math.min(1, props.pct || 0)));
     background-position: -100% 0;
   }
 }
+.ao-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+.ao-elapsed {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-dim, #8a8f98);
+  font-variant-numeric: tabular-nums;
+}
 .ao-stage-name {
   width: 28px;
   text-align: left;
@@ -318,7 +352,9 @@ const pct = computed(() => Math.max(0, Math.min(1, props.pct || 0)));
 
 /* ---- 文案 ---- */
 .ao-msg {
-  margin-top: 10px;
+  /* 间距由 .ao-foot 统一给；这里只管省略号 */
+  flex: 1;
+  min-width: 0;
   font-size: 11.5px;
   color: var(--text, #1f2328);
   /* 高度固定：文案长短变化时卡片不跳 */

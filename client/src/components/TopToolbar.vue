@@ -89,8 +89,6 @@ const emit = defineEmits<{
   (e: 'set-key', v: { tonic: string; mode: 'major' | 'minor' }): void;
   /** 恢复自动推断的调性 */
   (e: 'reset-key'): void;
-  /** 导出讲解稿（Markdown，给人看） */
-  (e: 'export-lecture'): void;
   /** 导出工程文件（.fbsong，完整 JSON） */
   (e: 'export-fbsong'): void;
 }>();
@@ -240,7 +238,7 @@ const current = computed(() => DICT_INFO[dict.value]);
             <span>{{ info.ms }}</span>
           </div>
         </button>
-        <div class="dict-note">档位影响记谱精细度（转位/低音是否保留），不影响和弦判断</div>
+        <div class="dict-note">三档结果在分析时已全部算好，切换立即生效、不用重新分析</div>
       </div>
     </div>
 
@@ -333,21 +331,7 @@ const current = computed(() => DICT_INFO[dict.value]);
     >
       {{ reanalyzing ? '分析中…' : '重新分析全曲' }}
     </button>
-    <!--
-      两种导出，定位完全不同：
-        导出讲解 → Markdown，给人读（笔记 / 分享 / 教学），丢掉精度换可读性
-        导出 .fbsong → 完整 JSON，给程序读（备份 / 迁移 / 再导入），不裁任何字段
-      所以并列成两个按钮，而不是一个「导出」加格式下拉 ——
-      用户点的时候心里已经明确「我要给人看」还是「我要备份」。
-    -->
-    <button
-      class="act-btn"
-      :disabled="!canExport"
-      title="生成一份可读的和声讲解（Markdown）"
-      @click="emit('export-lecture')"
-    >
-      导出讲解
-    </button>
+    <!-- 导出：完整 JSON，给程序读（备份 / 迁移 / 再导入），不裁任何字段 -->
     <button
       class="act-btn primary"
       :disabled="!canExport"

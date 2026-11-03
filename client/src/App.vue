@@ -38,10 +38,18 @@ import {
   type TempoSegment,
 } from './timeline/demo/realData';
 import { relatedMinor } from './timeline/domain/ChordNotation';
-import { loadEdits, saveEdits, writeTextFile, type SongEdits, type SongListItem } from './api/backend';
+import { PPQ } from './timeline/domain/Tick';
+import {
+  loadEdits,
+  readTextFile,
+  saveEdits,
+  writeTextFile,
+  type SongEdits,
+  type SongListItem,
+} from './api/backend';
+import { lrcSpans, parseLrc, type LrcLine } from './timeline/domain/Lrc';
 import {
   buildFbsongBundle,
-  buildLectureMarkdown,
   serializeFbsong,
   suggestFileName,
 } from './export/exporters';
@@ -57,6 +65,25 @@ import { SilentEngine, WebAudioEngine, type AudioEngine } from './timeline/audio
  * 所以这里统一从 `library.currentAnalysis` 取数据。
  */
 const library = useLibrary();
+
+/**
+ * 全局轻提示。
+ *
+ * 为什么不用 `window.alert`：它是浏览器原生模态框（和这套界面完全两个风格），
+ * 而且会阻塞整个 WebView —— 导入歌词失败时弹一个灰框，用户还得再点一下确定。
+ * 这里做一个 4 秒自动消失的条状提示，只用于「操作结果」这类无需确认的信息。
+ */
+const notice = ref<string | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showNotice(msg: string) {
+  notice.value = msg;
+  if (noticeTimer) clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    notice.value = null;
+    noticeTimer = null;
+  }, 4000);
+}
 
 /** 解析当前曲目的分析结果 */
 const analysis = computed<AnalysisFile | null>(() => {
@@ -426,7 +453,8 @@ const tempoMap = computed(() => {
   }
 });
 
-const meterMap = computed(() => makeRealMeterMap());
+// 拍号按每首歌的 meta.meter（6/8 的歌不能再按 4/4 画）
+const meterMap = computed(() => makeRealMeterMap(data.value));
 const totalTicks = computed(() => totalTicksOf(data.value));
 
 /**
@@ -485,14 +513,55 @@ const emptyHint = computed<{ icon: string; title: string; sub: string } | null>(
  *   只有播放走时速度变 —— 于是"和声对不上"是正常的，
  *   因为用户主动修改了速度假设。
  */
+/**
+ * 拍号（`meta.meter`，老数据退回 4/4）。
+ *
+ * 下面两个值都必须按拍号算，否则 6/8 的歌会整片错位：
+ *   - `beatsPerBar` 决定「每小节几拍」（自愈重建用）
+ *   - `beatTicks` 决定「一拍多少 tick」（和弦边界换算用）
+ *
+ * 硬编码 `PPQ = 960` 时，6/8 的每拍（八分音符）被当成 960，
+ * 于是所有和弦边界 tick 翻倍 —— 用户看到「和声全部被拉伸」。
+ */
+const meterInfo = computed(() => {
+  const m = data.value.meta?.meter;
+  const num = m && m.numerator > 0 ? m.numerator : 4;
+  const den = m && m.denominator > 0 ? m.denominator : 4;
+  return {
+    beatsPerBar: num,
+    beatTicks: Math.round((PPQ * 4) / den),
+  };
+});
+
 const beatSnapper = computed(() =>
-  makeBeatSnapper(data.value.beatsSec, data.value.downbeatsSec),
+  makeBeatSnapper(
+    data.value.beatsSec,
+    data.value.downbeatsSec,
+    meterInfo.value.beatsPerBar,
+    meterInfo.value.beatTicks,
+  ),
 );
 
 function secToTickReal(sec: number): number {
   const v = beatSnapper.value(sec);
   return Math.max(0, Math.min(totalTicks.value, v));
 }
+
+/**
+ * 解码档位。
+ *
+ * 分析结果里 `chords` 同时存了 `submission` / `ismir2017` / `full` 三份词表
+ * 的解码结果（见 neural/analyze_song.py），所以切档位**不需要重新分析**，
+ * 只是换一份数据来画：
+ *   - submission（25 个）：常用和弦，保留转位/低音   ← 默认
+ *   - ismir2017（14 个）：MIREX 基础集，抹掉转位/低音
+ *   - full（381 个）：全量，含 maj(b5)、7(b9) 这类变体
+ *
+ * ⚠️ 必须声明在 `analysisKey` / `effectiveKey` 之前：
+ * 那两个 computed 会读它，而 computed 首次求值发生在 setup 期间，
+ * 顺序反了会踩 const 的暂时性死区（整页白屏）。
+ */
+const dictionary = ref<'submission' | 'ismir2017' | 'full'>('submission');
 
 /**
  * 分析结果指纹。
@@ -513,6 +582,18 @@ const analysisKey = computed(() => {
     a.song.durationSec.toFixed(1),
   ].join('-');
 });
+
+/**
+ * 传给时间轴的**完整**指纹 = 分析指纹 + 当前档位。
+ *
+ * 把档位并进来是为了让「切档位」表现得像换了一份数据：
+ *   - 时间轴按 `editKey` 重建，和弦轨立刻换成新档位的解码结果
+ *   - 和弦编辑（`chordEdit.basedOn` 存的是这个值）只在自己所属的档位生效，
+ *     所以切到别的档位看到的永远是**模型原始结果**，不会出现
+ *     「用户按 submission 改的和弦压在 ismir2017 结果上」
+ *   - 切回原档位时 basedOn 又能对上，手改原样回来
+ */
+const dictKey = computed(() => `${dictionary.value}|${analysisKey.value}`);
 
 /**
  * 传给时间轴的「换数据」判据：歌曲 id + 分析指纹。
@@ -536,20 +617,37 @@ const editKey = computed(() => {
   //   edits 终于加载完 → 已经晚了
   //
   // 所以加载期间给一个**恒定值**，只有 ready 之后才带上真指纹。
-  if (!id) return '';
+  // 没有选中曲目（空态 / 浏览器调试模式）时也要跟着档位重建，
+  // 否则切档位在那儿没有任何反应
+  if (!id) return `-:${dictKey.value}`;
   if (!editsReady.value[id]) return `${id}:pending`;
-  return `${id}:${analysisKey.value}:r`;
+  return `${id}:${dictKey.value}:r`;
 });
+
+/**
+ * 这份和弦编辑是否适用于当前档位。
+ *
+ * `basedOn` 现在存 `档位|分析指纹`，所以切档位时旧档位的手改自动不生效
+ * （看到的是新档位的模型原始结果），切回来又能对上。
+ *
+ * 兼容旧数据：档位功能上线前落盘的是**纯分析指纹**。那就等价于
+ * submission 档 —— 不认的话用户已有的手改会在升级后全部"消失"。
+ * 一旦再次写盘就会升级成新格式，所以这段兼容只需留着别删。
+ */
+function chordEditApplies(ce: NonNullable<SongEdits['chordEdit']>): boolean {
+  if (ce.basedOn === dictKey.value) return true;
+  return ce.basedOn === analysisKey.value && dictionary.value === 'submission';
+}
 
 /**
  * 把用户编辑过的和弦块盖回分析结果上。
  *
  * 编辑存的是**整份快照**（见 `SongEdits.chordEdit`），所以这里直接替换
- * 和弦轨的 clips。指纹对不上说明分析重跑过，编辑作废。
+ * 和弦轨的 clips。指纹对不上说明分析重跑过（或换了档位），编辑不适用。
  */
 function applyChordEdits(base: RealTrack[]): RealTrack[] {
   const ce = currentEdits.value.chordEdit;
-  if (!ce || ce.basedOn !== analysisKey.value || !ce.clips.length) return base;
+  if (!ce || !chordEditApplies(ce) || !ce.clips.length) return base;
   return base.map((t) =>
     t.kind === 'chord'
       ? {
@@ -604,7 +702,8 @@ function applySectionEdits(base: RealTrack[]): RealTrack[] {
  */
 const baseTracks = computed(() =>
   makeRealTracks(data.value, {
-    dict: 'submission',
+    /** 档位一换，整条和弦轨就是另一份解码结果（三档都在 JSON 里，不用重跑模型） */
+    dict: dictionary.value,
     bySecToTick: secToTickReal,
     /**
      * 导入时吸附到小节线（**1/4 小节 = 1 拍**以内才吸）。
@@ -635,6 +734,8 @@ const baseTracks = computed(() =>
      */
     snapToBar: 0.25,
     minBeats: 1,
+    // 「一拍」「最小 N 拍」都按拍号算（6/8 的一拍是八分 = 480 tick）
+    beatTicks: meterInfo.value.beatTicks,
   }),
 );
 
@@ -691,7 +792,7 @@ function onChordEditsChange(clips: ChordEditSnapshot[]) {
     return;
   }
 
-  patchCurrentEdits({ chordEdit: { basedOn: analysisKey.value, clips } });
+  patchCurrentEdits({ chordEdit: { basedOn: dictKey.value, clips } });
 }
 
 /**
@@ -728,6 +829,202 @@ function onSectionEditsChange(clips: SectionEditSnapshot[]) {
 function onRestoreAiSections() {
   patchCurrentEdits({ sections: undefined });
 }
+/** 用户创建的歌词轨（来自 edits） */
+const lyricTracks = computed(() => currentEdits.value.lyricTracks ?? []);
+
+/** 歌词轨 id 序号（只需保证同一首歌内不重） */
+let lyricTrackSeq = 0;
+
+/** 一条歌词轨 → 时间轴要的 RealTrack（歌词文本放在 label 上，渲染直接读） */
+const lyricRealTracks = computed<RealTrack[]>(() =>
+  lyricTracks.value.map((t) => ({
+    id: t.id,
+    kind: 'lyric',
+    name: t.name?.trim() || '歌词',
+    visible: true,
+    clips: t.clips.map<RealClip>((c) => ({
+      id: c.id,
+      startTick: c.startTick,
+      endTick: c.endTick,
+      label: c.text,
+      // 歌词没有「确认」语义，统一给 draft（渲染时只影响右上角的小圆点，
+      // 而那个圆点只在低置信度时出现，歌词没有 confidence 所以不显示）
+      state: 'draft',
+    })),
+  })),
+);
+
+/**
+ * 把 LRC 的秒级时间戳变成 tick 级歌词块。
+ *
+ * ## 对齐方案（和和弦 / 结构同一套）
+ *
+ * 走 `secToTickReal` → `makeBeatSnapper`：把时间吸附到**最近的拍点**。
+ * 不这么做的话，LRC 的时间戳（如 18.539s）落在两拍之间，渲染出来的块
+ * 会和和弦/结构轨的格子错开半个格子，看着像没对齐。
+ *
+ * ## 终点怎么定
+ *
+ * LRC 只给起点，用「下一句的起点」当终点（唱完这句才换下一句）。
+ * 两句被吸附到同一拍时（快节奏的短句）保证至少 1 拍，否则宽度为 0
+ * 就看不见了。
+ */
+function buildLyricClips(lines: readonly LrcLine[]): Array<{
+  id: string;
+  startTick: number;
+  endTick: number;
+  text: string;
+}> {
+  const total = totalTicks.value;
+  if (!total || lines.length === 0) return [];
+  const beat = Math.max(1, meterInfo.value.beatTicks);
+  const lastSec = lines[lines.length - 1].startSec + 4;
+  const spans = lrcSpans(lines, lastSec);
+
+  const out: Array<{ id: string; startTick: number; endTick: number; text: string }> = [];
+  for (const span of spans) {
+    const startTick = secToTickReal(span.startSec);
+    if (startTick >= total) continue; // 超出曲末（LRC 比音频长）
+    let endTick = secToTickReal(span.endSec);
+    if (endTick <= startTick) endTick = startTick + beat;
+    endTick = Math.min(total, endTick);
+    out.push({ id: `ly-${out.length}`, startTick, endTick, text: span.text });
+  }
+  return out;
+}
+
+/**
+ * 添加一条歌词轨。
+ *
+ * 流程：先弹文件选择 →
+ *   - 选了 LRC/TXT：解析时间戳，按拍点对齐后建轨
+ *   - 取消：建一条**空白轨**（用户可以在时间轴上双击手动加句）
+ *
+ * 歌词存进 `edits.json`（和 sections / degreeTracks 一起），不写进
+ * analysis.json —— 后者是模型产物，重新分析会整份覆盖。
+ */
+async function addLyricTrack() {
+  const songId = library.currentId.value;
+  if (!songId) {
+    showNotice('先选一首歌');
+    return;
+  }
+  if (library.standalone) {
+    showNotice('浏览器模式不支持导入歌词（需要 Tauri 后端）');
+    return;
+  }
+  if (!data.value.beatsSec.length) {
+    showNotice('这首歌还没有拍点数据，无法对齐歌词');
+    return;
+  }
+
+  let path: string | null = null;
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: '选择歌词文件（取消则创建空白歌词轨）',
+      filters: [{ name: '歌词文件', extensions: ['lrc', 'txt'] }],
+    });
+    path = typeof picked === 'string' ? picked : null;
+  } catch (e) {
+    showNotice(`打开文件选择框失败：${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
+  lyricTrackSeq += 1;
+  const id = `${songId}-lyr-${lyricTrackSeq}`;
+
+  // ---- 取消选择 → 空白轨 ----
+  if (!path) {
+    patchCurrentEdits({
+      lyricTracks: [...lyricTracks.value, { id, name: '歌词', clips: [] }],
+    });
+    showNotice('已创建空白歌词轨（在时间轴上双击可加句）');
+    return;
+  }
+
+  // ---- 读文件 + 解析 ----
+  let raw = '';
+  try {
+    raw = await readTextFile(path);
+  } catch (e) {
+    showNotice(`读取歌词失败：${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  const parsed = parseLrc(raw);
+  if (!parsed.lines.length) {
+    showNotice(
+      parsed.timedOnly
+        ? '这份歌词只有时间轴没有文字，无法导入'
+        : '没有识别到时间戳 —— 只有 LRC 格式（[00:12.34]歌词）才能对齐到时间轴',
+    );
+    return;
+  }
+
+  const clips = buildLyricClips(parsed.lines);
+  if (!clips.length) {
+    showNotice('歌词时间戳全部超出曲末，未导入');
+    return;
+  }
+
+  const albumTitle = parsed.meta.ti?.trim();
+  patchCurrentEdits({
+    lyricTracks: [...lyricTracks.value, { id, name: albumTitle || '歌词', clips }],
+  });
+
+  // 片头制作信息（作词/编曲/和声/混音…）已经自动识别掉了，但那是启发式 ——
+  // 告诉用户「剩下的可以右键删」，否则他看到版权声明那条会以为导入出错
+  const creditCount = Object.keys(parsed.meta).filter(
+    (k) => !['ti', 'ar', 'al', 'by', 'offset', 'length', 're', 've'].includes(k),
+  ).length;
+  showNotice(
+    `已导入 ${clips.length} 句歌词` +
+      (creditCount ? `（片头 ${creditCount} 条制作信息已自动跳过）` : '') +
+      '；多出的行可右键删除',
+  );
+}
+
+/** 删除一条歌词轨 */
+function removeLyricTrack(id: string) {
+  if (!library.currentId.value) return;
+  patchCurrentEdits({
+    lyricTracks: lyricTracks.value.filter((t) => t.id !== id),
+  });
+}
+
+/**
+ * 歌词块编辑结果 → 落盘。
+ *
+ * 内容没变就不写盘（拖动一下再拖回原位不该产生一次写盘）。
+ */
+function onLyricEditsChange(payload: {
+  trackId: string;
+  clips: { id: string; startTick: number; endTick: number; text: string }[];
+}) {
+  if (!library.currentId.value) return;
+  const list = lyricTracks.value;
+  const idx = list.findIndex((t) => t.id === payload.trackId);
+  if (idx < 0) return;
+
+  const cur = list[idx].clips;
+  const same =
+    cur.length === payload.clips.length &&
+    cur.every(
+      (c, i) =>
+        c.id === payload.clips[i].id &&
+        c.text === payload.clips[i].text &&
+        c.startTick === payload.clips[i].startTick &&
+        c.endTick === payload.clips[i].endTick,
+    );
+  if (same) return;
+
+  const next = list.slice();
+  next[idx] = { ...list[idx], clips: payload.clips };
+  patchCurrentEdits({ lyricTracks: next });
+}
+
 /**
  * 追加一条级数轨。
  *
@@ -771,13 +1068,17 @@ function updateDegreeTrackKey(id: string, k: { tonic: string; mode: 'major' | 'm
  */
 const allTracks = computed(() => {
   const base = tracks.value;
-  if (extraDegreeTracks.value.length === 0) return base;
-  const chordTrack = base.find((t) => t.kind === 'chord');
-  const chords = chordTrack?.clips ?? [];
-  const extra = extraDegreeTracks.value.map((t) =>
-    makeDegreeTrack(chords, t.tonic, t.mode, t.id),
-  );
-  return [...base, ...extra];
+  const extra: RealTrack[] = [];
+  if (extraDegreeTracks.value.length > 0) {
+    const chordTrack = base.find((t) => t.kind === 'chord');
+    const chords = chordTrack?.clips ?? [];
+    for (const t of extraDegreeTracks.value) {
+      extra.push(makeDegreeTrack(chords, t.tonic, t.mode, t.id));
+    }
+  }
+  // 歌词轨排在最后：它是用户加的附加信息，不该插在和弦/结构之间
+  extra.push(...lyricRealTracks.value);
+  return extra.length ? [...base, ...extra] : base;
 });
 
 /**
@@ -822,7 +1123,7 @@ const currentKeyOverride = computed(() => currentEdits.value.key ?? null);
 const effectiveKey = computed(() => {
   const ov = currentKeyOverride.value;
   if (ov) return ov;
-  const k = inferKey(data.value);
+  const k = inferKey(data.value, dictionary.value);
   return {
     tonic: k.tonic,
     // 空谱面时 mode 也是空串，统一归一到 major 只为了类型，
@@ -838,7 +1139,7 @@ const effectiveKey = computed(() => {
  * 只给 UI 用，级数计算一律用 `effectiveKey`。
  */
 const autoKeyInfo = computed(() => {
-  const k = inferKey(data.value);
+  const k = inferKey(data.value, dictionary.value);
   return { tonic: k.tonic, mode: k.mode };
 });
 
@@ -891,20 +1192,28 @@ const SONG = computed(() => {
     bpm: a.meta?.bpmMedian ?? 0,
     bars: a.meta?.barCount ?? 0,
     beats: a.meta?.beatCount ?? 0,
-    segments: (a.chords?.['submission'] ?? []).length,
+    /** 和弦段数跟着档位走（ismir2017 会合并掉转位和弦，段数会少一些） */
+    segments: (a.chords?.[dictionary.value] ?? []).length,
     /** 调性：用户指定优先，否则自动推断；未知时不拼 "major" */
     key: key.tonic ? `${key.tonic} ${key.mode}` : '',
     /** 调性是否被用户改过（顶栏标注「手动」而不是「自动推断」） */
     keyIsManual: currentKeyOverride.value !== null,
-    meter: '4/4',
+    /**
+     * 拍号：从 `meta.meter` 读，**不能写死 '4/4'**。
+     *
+     * 这里曾经硬编码 '4/4'，于是《海蓝色圆舞曲》分析出 6/8、
+     * BPM 也算对了 94.74，顶栏却仍然写着 4/4 —— 用户直接发现「还是 4/4」。
+     * 老数据没有 `meta.meter`（那时全流程按 4/4 处理），退回 '4/4'。
+     */
+    meter: a.meta?.meter
+      ? `${a.meta.meter.numerator}/${a.meta.meter.denominator}`
+      : '4/4',
     /** 调音偏差（已校正过才非 0） */
     tuningCents: a.tuning?.corrected ? a.tuning.deviationCents : undefined,
-    /** 当前分析档位 */
-    dictionary: 'submission' as 'submission' | 'ismir2017' | 'full',
+    /** 当前解码档位（顶栏下拉显示用） */
+    dictionary: dictionary.value,
   };
 });
-
-const dictionary = ref<'submission' | 'ismir2017' | 'full'>(SONG.value.dictionary);
 
 /** 修改某段 BPM（速度轨双击编辑） */
 
@@ -961,7 +1270,9 @@ async function onReanalyze() {
 /* ---------------------------------------------------------------- 导出 */
 
 /** 有和弦或拍点数据才允许导出（空谱面导出来是一份空报告） */
-const hasAnalyzableData = computed(() => (data.value.chords?.submission?.length ?? 0) > 0 || totalTicks.value > 0);
+const hasAnalyzableData = computed(
+  () => (data.value.chords?.[dictionary.value]?.length ?? 0) > 0 || totalTicks.value > 0,
+);
 
 /**
  * 让用户选保存位置并写文件。
@@ -995,23 +1306,6 @@ async function saveTextWithDialog(args: {
   await writeTextFile(path, args.content);
 }
 
-/** 导出讲解稿（Markdown，给人看） */
-async function onExportLecture() {
-  if (!hasAnalyzableData.value) return;
-  const md = buildLectureMarkdown({
-    analysis: data.value,
-    tracks: allTracks.value,
-    key: effectiveKey.value,
-    keyIsManual: currentKeyOverride.value != null,
-    bpm: SONG.value.bpm,
-  });
-  await saveTextWithDialog({
-    fileName: suggestFileName(SONG.value.title, 'md'),
-    content: md,
-    filterName: 'Markdown',
-    extensions: ['md'],
-  });
-}
 
 /** 导出 .fbsong（完整 JSON，给程序读） */
 async function onExportFbsong() {
@@ -1059,6 +1353,32 @@ const analyzingInfo = computed(() => {
  * partial 事件在 beats / chords / structure 各推一次，
  * `partialStage` 是最后一次推的阶段名 —— 说明**它之前**的都完成了。
  */
+/**
+ * 本次分析的已用时长。
+ *
+ * 有些阶段（mel 谱、CQT、结构自相似矩阵）是**一整段并行/同步计算**，
+ * 内部没有可上报的点，进度百分比会静止几秒。这时一个在走的秒表
+ * 是最诚实的"还在动"信号 —— 不要为了动而动去伪造百分比。
+ */
+const analysisElapsedMs = ref(0);
+let analysisTick: ReturnType<typeof setInterval> | null = null;
+let analysisStartedAt = 0;
+
+watch(analyzingCurrent, (on) => {
+  if (on) {
+    analysisStartedAt = Date.now();
+    analysisElapsedMs.value = 0;
+    if (!analysisTick) {
+      analysisTick = setInterval(() => {
+        analysisElapsedMs.value = Date.now() - analysisStartedAt;
+      }, 500);
+    }
+  } else if (analysisTick) {
+    clearInterval(analysisTick);
+    analysisTick = null;
+  }
+});
+
 const doneStages = computed<string[]>(() => {
   const order = ['beats', 'chords', 'structure'];
   const cur = library.partialStage.value;
@@ -1135,6 +1455,13 @@ watch(inspectorWidth, (v) => persistWidth('tl.inspectorWidth', v));
  */
 const engine = shallowRef<AudioEngine>(new SilentEngine(SONG.value.durationSec));
 const hasAudio = ref(false);
+/**
+ * 当前音频源地址（给播放条解码真实波形用）。
+ *
+ * 单独存一份而不是让 PlayerBar 去问引擎：`WebAudioEngine` 内部是
+ * `<audio>` 元素，没有对外暴露 src，而波形解码只需要这个字符串。
+ */
+const audioSrc = ref<string | null>(null);
 let objectUrl: string | null = null;
 
 const playback = usePlayback({
@@ -1208,6 +1535,7 @@ async function swapEngine(src: string, label: string): Promise<void> {
     engine.value.dispose();
     engine.value = next;
     hasAudio.value = true;
+    audioSrc.value = src;
     playback.seekSec(pos);
     if (wasPlaying) void playback.play();
   } catch (e) {
@@ -1217,6 +1545,7 @@ async function swapEngine(src: string, label: string): Promise<void> {
     engine.value.dispose();
     engine.value = silent;
     hasAudio.value = false;
+    audioSrc.value = null;
     playback.seekSec(Math.min(pos, SONG.value.durationSec));
   }
 }
@@ -1227,6 +1556,29 @@ async function loadAudioFile(file: File) {
   objectUrl = URL.createObjectURL(file);
   await swapEngine(objectUrl, file.name);
 }
+
+/**
+ * 切歌：**停止播放，并把播放头放回开头**。
+ *
+ * 以前切歌只换谱面和音频，播放头留在上一首的位置：
+ * 4 分钟的歌切到 3 分钟的歌，光标直接越界；而且上一首在换音频那
+ * 一两秒里还在响（`swapEngine` 特意保留了播放位置和播放状态）。
+ *
+ * 那个"保留位置"是为了修另一个 bug —— 同一首歌的音频**异步加载**完成时
+ * 不能把光标拽回 0（用户已经点播放了）。两条路径的期望不同：
+ *   - 同一首歌音频加载完成 → 保持位置，继续播（见 `swapEngine`）
+ *   - 换一首歌             → 归零，停住（这里）
+ * 所以位置归零必须发生在 `currentId` 变化时（立刻），而不是等音频加载完。
+ */
+watch(
+  () => library.currentId.value,
+  () => {
+    playback.pause();
+    // 循环区间是按 tick 划的，跨曲目没有意义
+    playback.clearLoop();
+    playback.seekSec(0);
+  },
+);
 
 /**
  * 切歌后重新加载音频。
@@ -1248,6 +1600,7 @@ watch(
       engine.value.dispose();
       engine.value = silent;
       hasAudio.value = false;
+      audioSrc.value = null;
       playback.seekSec(0);
       return;
     }
@@ -1304,6 +1657,10 @@ if (typeof window !== 'undefined') {
   window.addEventListener('keydown', onGlobalKey);
 }
 onBeforeUnmount(() => {
+  if (analysisTick) {
+    clearInterval(analysisTick);
+    analysisTick = null;
+  }
   if (typeof window !== 'undefined') window.removeEventListener('keydown', onGlobalKey);
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   engine.value.dispose();
@@ -1343,6 +1700,18 @@ function onZoomSet(pct: number) {
 function onPickChord(chord: string) {
   (timelineRef.value as unknown as { setSelectedLabel?: (label: string) => boolean } | null)
     ?.setSelectedLabel?.(chord);
+}
+
+/**
+ * 改当前选中片段的文本（歌词轨用）。
+ *
+ * 走编辑层的 `setSelectedLabel`，所以：
+ *   - 进撤销历史（Ctrl+Z 可回退）
+ *   - 触发 lyric-edits-change → 落盘进 edits.json
+ */
+function onSetClipLabel(text: string) {
+  (timelineRef.value as unknown as { setSelectedLabel?: (label: string) => boolean } | null)
+    ?.setSelectedLabel?.(text);
 }
 
 /**
@@ -1398,7 +1767,9 @@ const selectedClip = computed(() => {
   if (!live) return undefined;
 
   // 从轨道 id 反推轨道种类（检查器里要显示 kind）
-  const track = tracks.value.find((t) => t.id === live.trackId);
+  // 必须用 allTracks：歌词轨 / 级数轨是用户加的，不在 tracks 里，
+  // 用 tracks 找会让歌词块被当成 chord（检查器显示一堆和弦字段）
+  const track = allTracks.value.find((t) => t.id === live.trackId);
 
   return {
     kind: (track?.kind as string) ?? 'chord',
@@ -1446,7 +1817,6 @@ const selectedClip = computed(() => {
       :reanalyzing="reanalyzing"
       @reanalyze="onReanalyze"
       :can-export="hasAnalyzableData"
-      @export-lecture="onExportLecture"
       @export-fbsong="onExportFbsong"
       :key-is-manual="SONG.keyIsManual"
       :auto-key="autoKeyInfo"
@@ -1506,6 +1876,7 @@ const selectedClip = computed(() => {
           :message="analyzingInfo?.message"
           :stage="analyzingInfo?.stage"
           :done-stages="doneStages"
+          :elapsed-ms="analysisElapsedMs"
         />
 
         <TimelineView
@@ -1531,6 +1902,9 @@ const selectedClip = computed(() => {
           @chord-edits-change="onChordEditsChange"
           @section-edits-change="onSectionEditsChange"
           @restore-ai-sections="onRestoreAiSections"
+          @add-lyric-track="addLyricTrack"
+          @remove-lyric-track="removeLyricTrack"
+          @lyric-edits-change="onLyricEditsChange"
         />
       </div>
 
@@ -1546,6 +1920,7 @@ const selectedClip = computed(() => {
         :width="inspectorWidth"
         :open-picker-signal="openPickerNonce"
         @pick-chord="onPickChord"
+        @set-label="onSetClipLabel"
       />
     </div>
 
@@ -1559,6 +1934,7 @@ const selectedClip = computed(() => {
       :bar-number="currentBar"
       :error="playback.error.value"
       :has-audio="hasAudio"
+      :audio-src="audioSrc"
       @seek="playback.seekSec"
       @toggle-play="playback.toggle"
       @nudge="playback.nudgeSec"
@@ -1576,6 +1952,9 @@ const selectedClip = computed(() => {
       @cancel="reconnectTargetId = null"
     />
 
+
+    <!-- 全局轻提示 -->
+    <div v-if="notice" class="app-notice">{{ notice }}</div>
 
     <!-- 开发期角标：提示这是假 UI -->
     <div class="dev-badge">
@@ -1655,6 +2034,29 @@ const selectedClip = computed(() => {
   max-width: 420px;
 }
 
+
+.app-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 72px;
+  transform: translateX(-50%);
+  z-index: 400;
+  max-width: 60vw;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(26, 26, 26, 0.92);
+  border-left: 2px solid var(--accent);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  animation: notice-in 150ms ease-out;
+}
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+}
 
 .dev-badge {
   position: fixed;

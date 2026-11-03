@@ -7,7 +7,9 @@
  *   - 有音频文件时走 HTMLAudioElement，无音频时走静音推进
  *   - 播放头位置由引擎的 currentTime 驱动，经 TempoMap 换算成 tick
  *
- * 假的部分只剩**波形图形**（真实峰值需要 M2 的后端 ffmpeg 解码）。
+ * 波形：从音频源解码出真峰值（`decodeAudioData`），每首歌算一次并缓存。
+ * 解不出来（源不可读 / 格式不支持 / 太长）就**什么都不画** ——
+ * 以前这里画的是随机数生成的假波形，看起来像真数据，比空着更糟。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { COLORS } from '../timeline/design/tokens';
@@ -28,6 +30,8 @@ const props = defineProps<{
   error?: string | null;
   /** 是否有真实音频 */
   hasAudio?: boolean;
+  /** 当前音频源（用来解码真实波形；为空则不画波形） */
+  audioSrc?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -44,32 +48,88 @@ const wrapRef = ref<HTMLDivElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const width = ref(800);
 
-/** 生成假峰值（真实波形要等 M2 后端解码） */
-function buildPeaks(bins: number): Float32Array {
-  const peaks = new Float32Array(bins * 2);
-  let seed = 12345;
-  const rnd = () => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed / 0x7fffffff;
-  };
-  for (let i = 0; i < bins; i++) {
-    const t = i / bins;
-    const section =
-      0.22 +
-      0.4 * Math.max(0, Math.sin(t * Math.PI * 1.1 - 0.4)) +
-      0.28 * (t > 0.42 && t < 0.62 ? 1 : 0) +
-      0.18 * (t > 0.75 ? 1 : 0);
-    const beatHz = (t * props.durationSec) / 0.76;
-    const beat = 0.5 + 0.5 * Math.sin(beatHz * Math.PI * 2);
-    const noise = rnd();
-    const amp = Math.min(1, section * (0.5 + 0.5 * beat) * (0.55 + 0.45 * noise));
-    peaks[i * 2] = -amp;
-    peaks[i * 2 + 1] = amp;
+/**
+ * 波形的固定分辨率。
+ *
+ * 独立于画布宽度：这样窗口缩放时不用重新解码，只在绘制时做一次索引映射。
+ */
+const PEAK_BINS = 1024;
+
+/** 每首歌的峰值缓存（按音频源地址）。null = 解过但失败，不再重试。 */
+const peaksBySrc = new Map<string, Float32Array | null>();
+/** 当前音频源的峰值；null = 还没算好 / 算不出来 → 不画波形 */
+const peaksRef = ref<Float32Array | null>(null);
+let peaksLoading: string | null = null;
+
+/**
+ * 解码音频并算峰值（min/max per bin）。
+ *
+ * 为什么在前端算而不走 Rust：音频本来就已经交给 `<audio>` 解码播放了，
+ * 这里再 `decodeAudioData` 一次就够了，不用新增一条后端命令和一套 IPC。
+ * 4 分钟的歌大概几十毫秒到几百毫秒，异步、不挡 UI。
+ */
+async function computePeaks(src: string): Promise<Float32Array | null> {
+  try {
+    const res = await fetch(src);
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    // OfflineAudioContext 只为拿到解码器，不需要真的播放
+    const ac = new OfflineAudioContext(1, 1, 44100);
+    const audio = await ac.decodeAudioData(buf);
+    const chans: Float32Array[] = [];
+    for (let c = 0; c < audio.numberOfChannels; c++) chans.push(audio.getChannelData(c));
+    const n = audio.length;
+    if (!n) return null;
+
+    const out = new Float32Array(PEAK_BINS * 2);
+    const step = n / PEAK_BINS;
+    for (let i = 0; i < PEAK_BINS; i++) {
+      const s = Math.floor(i * step);
+      const e = Math.min(n, Math.max(s + 1, Math.floor((i + 1) * step)));
+      let lo = 0;
+      let hi = 0;
+      for (const data of chans) {
+        for (let k = s; k < e; k++) {
+          const v = data[k];
+          if (v > hi) hi = v;
+          else if (v < lo) lo = v;
+        }
+      }
+      out[i * 2] = lo;
+      out[i * 2 + 1] = hi;
+    }
+    return out;
+  } catch (e) {
+    console.warn('[player] 波形解码失败，改为不显示波形', e);
+    return null;
   }
-  return peaks;
 }
 
-let peaksCache: Float32Array | null = null;
+watch(
+  () => props.audioSrc,
+  async (src) => {
+    peaksRef.value = null;
+    if (!src) return;
+    if (peaksBySrc.has(src)) {
+      peaksRef.value = peaksBySrc.get(src) ?? null;
+      draw();
+      return;
+    }
+    if (peaksLoading === src) return;
+    peaksLoading = src;
+    const peaks = await computePeaks(src);
+    // 缓存上限：每首 8KB，几百首也就几 MB，但别无限涨（blob: 源 revoke 后
+    // 那份峰值再也用不上了）
+    if (peaksBySrc.size > 64) peaksBySrc.clear();
+    peaksBySrc.set(src, peaks);
+    if (peaksLoading === src) peaksLoading = null;
+    // 期间用户可能又切歌了，别把旧波形贴到新歌上
+    if (props.audioSrc !== src) return;
+    peaksRef.value = peaks;
+    draw();
+  },
+);
+
 
 function draw() {
   const canvas = canvasRef.value;
@@ -85,8 +145,7 @@ function draw() {
   ctx.clearRect(0, 0, w, h);
 
   const bins = Math.max(1, Math.floor(w / 2));
-  if (!peaksCache || peaksCache.length !== bins * 2) peaksCache = buildPeaks(bins);
-  const peaks = peaksCache;
+  const peaks = peaksRef.value;
   const mid = h / 2;
   const dur = Math.max(0.001, props.durationSec);
   const playedX = (props.currentSec / dur) * w;
@@ -107,18 +166,26 @@ function draw() {
     ctx.stroke();
   }
 
-  for (let i = 0; i < bins; i++) {
-    const x = i * 2;
-    const min = peaks[i * 2];
-    const max = peaks[i * 2 + 1];
-    const played = x <= playedX;
-    ctx.fillStyle = played ? COLORS.accent : COLORS.trackBeat;
-    ctx.globalAlpha = played ? 0.9 : 0.5;
-    const y1 = mid - max * (mid - 3);
-    const y2 = mid - min * (mid - 3);
-    ctx.fillRect(x, y1, 1.4, Math.max(1, y2 - y1));
+  // 有真实峰值才画；没有就只剩轨道 + 播放头（不画假数据）
+  if (peaks) {
+    for (let i = 0; i < bins; i++) {
+      const x = i * 2;
+      // 固定 1024 bin → 画布 bin 的映射（窗口缩放时不用重新解码）
+      const p = Math.min(
+        PEAK_BINS - 1,
+        Math.floor((i / bins) * PEAK_BINS),
+      );
+      const min = peaks[p * 2];
+      const max = peaks[p * 2 + 1];
+      const played = x <= playedX;
+      ctx.fillStyle = played ? COLORS.accent : COLORS.trackBeat;
+      ctx.globalAlpha = played ? 0.9 : 0.5;
+      const y1 = mid - max * (mid - 3);
+      const y2 = mid - min * (mid - 3);
+      ctx.fillRect(x, y1, 1.4, Math.max(1, y2 - y1));
+    }
+    ctx.globalAlpha = 1;
   }
-  ctx.globalAlpha = 1;
 
   // 播放头
   ctx.strokeStyle = COLORS.playhead;
@@ -136,10 +203,7 @@ onMounted(() => {
     width.value = wrapRef.value.clientWidth;
     ro = new ResizeObserver(() => {
       const w = wrapRef.value?.clientWidth ?? width.value;
-      if (w !== width.value) {
-        width.value = w;
-        peaksCache = null;
-      }
+      if (w !== width.value) width.value = w;
       draw();
     });
     ro.observe(wrapRef.value);
@@ -257,12 +321,17 @@ const remain = computed(() => Math.max(0, props.durationSec - props.currentSec))
 
     <!-- 右侧：音频源 -->
     <div class="right">
-      <button class="dev-btn" :class="{ warn: !hasAudio }" :title="hasAudio ? '已加载音频' : '未加载音频（静音推进）'" @click="pickFile">
+      <button
+        class="dev-btn"
+        :class="{ warn: !hasAudio }"
+        :title="hasAudio ? '换一个音频文件（不改变曲库记录）' : '未加载音频（静音推进），可手动指定一个音频文件'"
+        @click="pickFile"
+      >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
           <path d="M2 6h2.5L8 3v10L4.5 10H2V6z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
           <path d="M10.5 5.5a3.5 3.5 0 010 5M12.5 3.5a6 6 0 010 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
         </svg>
-        <span class="dev-name">{{ hasAudio ? '音频已加载' : '选择音频' }}</span>
+        <span class="dev-name">{{ hasAudio ? '更换音频源' : '选择音频' }}</span>
       </button>
       <input ref="fileInputRef" type="file" accept="audio/*" class="hidden-input" @change="onFileChange" />
     </div>

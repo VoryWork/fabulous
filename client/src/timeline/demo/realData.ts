@@ -50,6 +50,14 @@ export interface AnalysisFile {
   tempoSegments?: TempoSegment[];
   meta: {
     beatsPerBar: number;
+    /**
+     * 拍号。**老数据没有这个字段**（那时全流程写死 4/4），所以要当可选。
+     *
+     * 为什么必须单独存：`beatsPerBar` 只说「一小节几拍」，
+     * 但 6/8 和 3/4 的拍数可能都是 3（若按附点四分算），
+     * 而「一小节多少 tick」取决于分母（6/8 的拍是八分）。
+     */
+    meter?: { numerator: number; denominator: number; confidence?: number };
     bpmMedian: number;
     barSecMedian: number;
     beatCount: number;
@@ -177,7 +185,62 @@ export interface RealTrack {
   clips: RealClip[];
 }
 
-const TICKS_PER_BAR = 4 * PPQ;
+const DEFAULT_METER = { numerator: 4, denominator: 4 } as const;
+
+/**
+ * 一小节占多少 tick —— **必须由拍号算，不能写死 3840**。
+ *
+ * ## 写死 3840 的代价（真实事故）
+ *
+ * 《海蓝色圆舞曲》是 6/8：`beat_this` 正确检出每小节 6 个八分
+ * （拍间隔 0.320s × 6 = 1.92s = 一小节），但全链路按 4/4 处理，
+ * 结果 BPM 从 93.75 变成 126.32 —— 用户一眼看出「BPM 整体快了 3/4」。
+ *
+ * ## 公式
+ *
+ * `PPQ = 960` 是**四分音符**的 tick 数，所以：
+ *
+ *   一拍 tick = PPQ × 4 / denominator     （八分音符 = 480）
+ *   一小节   = 一拍 tick × numerator
+ *
+ *   4/4 → 960 × 4 = 3840
+ *   3/4 → 960 × 3 = 2880
+ *   6/8 → 480 × 6 = 2880
+ *   7/8 → 480 × 7 = 3360
+ *
+ * 注意 3/4 和 6/8 都等于 2880，但**内部拍数不同**（3 vs 6），
+ * 所以标尺要按 numerator 画拍号。
+ */
+export function barTicksOf(meter?: { numerator: number; denominator: number } | null): number {
+  const num = meter?.numerator;
+  const den = meter?.denominator;
+  if (!Number.isFinite(num) || !Number.isFinite(den) || !num || !den) {
+    return 4 * PPQ;
+  }
+  return Math.round((PPQ * 4) / den) * num;
+}
+
+/**
+ * 一小节有几个**四分音符** —— BPM 的分母。
+ *
+ * 6/8 一小节 6 个八分 = 3 个四分音符，所以 BPM = 3 / 小节秒数 × 60。
+ */
+export function quartersPerBarOf(meter?: { numerator: number; denominator: number } | null): number {
+  const num = meter?.numerator;
+  const den = meter?.denominator;
+  if (!Number.isFinite(num) || !Number.isFinite(den) || !num || !den) return 4;
+  return (num * 4) / den;
+}
+
+/** 从分析文件取拍号（老数据没有 → 退回 4/4） */
+export function meterOf(a: AnalysisFile): { numerator: number; denominator: number } {
+  const m = a.meta?.meter;
+  if (m && Number.isFinite(m.numerator) && Number.isFinite(m.denominator) && m.numerator > 0 && m.denominator > 0) {
+    return { numerator: m.numerator, denominator: m.denominator };
+  }
+  return { ...DEFAULT_METER };
+}
+
 
 /**
  * 长于这个长度（小节）的 `N` 段视为「模型没识别出来」，而不是「真的没有和弦」。
@@ -329,17 +392,27 @@ export function makeRealTempoMap(a: AnalysisFile): TempoMapData {
 
   const anchors: { tick: number; bpm: number }[] = [];
 
+  /**
+   * 每小节 tick 数和小节内四分音符数都由**拍号**决定。
+   *
+   * 写死 4 / 3840 时，6/8 的歌会被算成 BPM 快 4/3：
+   * 93.75 → 126.32（用户报的「BPM 整体快了 3/4」）。
+   */
+  const barTicks = barTicksOf(meterOf(a));
+  const quartersPerBar = quartersPerBarOf(meterOf(a));
+
   for (let i = 0; i < d.length - 1; i++) {
     const barSec = d[i + 1] - d[i];
-    const raw = barSec > 0 ? (4 / barSec) * 60 : midBpm;
+    // BPM = 一小节的四分音符数 / 小节秒数 × 60（6/8 是 3 个四分音符）
+    const raw = barSec > 0 ? (quartersPerBar / barSec) * 60 : midBpm;
     // 单个坏小节（NaN / 0 / 负数）不该炸掉整页
     const bpm = Number.isFinite(raw) && raw > 0 ? raw : midBpm;
-    anchors.push({ tick: i * TICKS_PER_BAR, bpm });
+    anchors.push({ tick: i * barTicks, bpm });
   }
   // 最后一小节用中位值
-  anchors.push({ tick: (d.length - 1) * TICKS_PER_BAR, bpm: midBpm });
+  anchors.push({ tick: (d.length - 1) * barTicks, bpm: midBpm });
   // 末尾再补一个，让最后一小节之后能外推
-  anchors.push({ tick: d.length * TICKS_PER_BAR, bpm: midBpm });
+  anchors.push({ tick: d.length * barTicks, bpm: midBpm });
 
   /**
    * ⚠️ 关键：tick 0 必须对应**第一个 downbeat 的秒数**，而不是 0。
@@ -419,14 +492,20 @@ export function fixDownbeats(downbeatsSec: readonly number[]): number[] {
  *
  * 正确行为：**第一个真实拍就是第 1 拍**，前奏该空着就空着。
  */
-/** 4/4 拍号（真实数据里 96.8% 的小节是 4 拍） */
-export function makeRealMeterMap(): MeterMapData {
-  return createMeterMap([{ startTick: 0, numerator: 4, denominator: 4 }]);
+/**
+ * 拍号映射。**按每首歌实际的拍号**，不再写死 4/4。
+ *
+ * 传 `a` 时读 `a.meta.meter`（analyze_song.py 的 `detect_meter` 产出）；
+ * 老数据没有这个字段 → 退回 4/4（那时的分析结果本来就按 4/4 处理）。
+ */
+export function makeRealMeterMap(a?: AnalysisFile): MeterMapData {
+  const m = a ? meterOf(a) : { numerator: 4, denominator: 4 };
+  return createMeterMap([{ startTick: 0, numerator: m.numerator, denominator: m.denominator }]);
 }
 
-/** 内容总 tick（小节数 × 3840） */
+/** 内容总 tick（小节数 × 每小节 tick） */
 export function totalTicksOf(a: AnalysisFile): number {
-  return a.downbeatsSec.length * TICKS_PER_BAR;
+  return a.downbeatsSec.length * barTicksOf(meterOf(a));
 }
 
 /**
@@ -708,9 +787,21 @@ export const chordToDegree = chordToNumber;
 export function makeBeatSnapper(
   beatsSec: readonly number[],
   downbeatsSec?: readonly number[],
+  /**
+   * 一小节几拍。必须传，否则 6/8 会被当 4/4 处理（见下方说明）。
+   */
+  beatsPerBar = 4,
+  /**
+   * **一拍多少 tick** —— 由拍号的分母决定，不是恒等于 PPQ。
+   *
+   * `PPQ = 960` 是**四分音符**的 tick 数，所以：
+   *   4/4（四分音符一拍）→ 960
+   *   6/8（八分音符一拍）→ 480
+   */
+  beatTicks = PPQ,
 ): (sec: number) => number {
   let beats = [...beatsSec];
-  const PPQ_LOCAL = PPQ;
+  const PPQ_LOCAL = beatTicks;
 
   /**
    * ## 自愈：beatsSec 必须满足「每 4 拍 = 1 小节」
@@ -734,20 +825,22 @@ export function makeBeatSnapper(
    * 真假，而且均分**永远不会让后续小节漂移**。
    */
   if (downbeatsSec && downbeatsSec.length > 1 && beats.length > 1) {
-    const want = downbeatsSec.length * 4;
+    // 每小节拍数由拍号决定（6/8 → 6，不是 4）
+    const perBar = Math.max(1, Math.round(beatsPerBar));
+    const want = downbeatsSec.length * perBar;
     // 差 1 个算正常抖动（首尾边界），差得多就是网格错位
     if (Math.abs(beats.length - want) > 1) {
       const d = downbeatsSec;
       const rebuilt: number[] = [];
       for (let i = 0; i < d.length - 1; i++) {
-        const step = (d[i + 1] - d[i]) / 4;
-        for (let k = 0; k < 4; k++) rebuilt.push(d[i] + k * step);
+        const step = (d[i + 1] - d[i]) / perBar;
+        for (let k = 0; k < perBar; k++) rebuilt.push(d[i] + k * step);
       }
       // 末尾：用最后一小节的速度补齐剩余时间
       const lastSpan = d[d.length - 1] - d[d.length - 2];
-      const step = lastSpan / 4;
+      const step = lastSpan / perBar;
       const tailEnd = Math.max(beats[beats.length - 1], d[d.length - 1] + lastSpan);
-      const nTail = Math.max(4, Math.round((tailEnd - d[d.length - 1]) / step));
+      const nTail = Math.max(perBar, Math.round((tailEnd - d[d.length - 1]) / step));
       for (let k = 0; k <= nTail; k++) rebuilt.push(d[d.length - 1] + k * step);
       beats = rebuilt;
     }
@@ -1037,14 +1130,24 @@ export function makeRealTracks(
      * 设 0 关闭（保留模型原始边界）。
      */
     snapToBar?: number;
-    /** 最小和弦长度（拍），默认 2（半小节） */
+    /** 最小和弦长度（拍），默认 1 */
     minBeats?: number;
+    /**
+     * **一拍多少 tick**（6/8 → 480，4/4 → 960）。
+     *
+     * 「吸附到整数拍」和「最小长度 N 拍」都以它为单位。
+     * 写死 `PPQ = 960` 时，6/8 里一个 960 tick 实际是**两拍**，
+     * 于是吸附把边界拉到「两个八分」的位置、最小长度也翻倍。
+     */
+    beatTicks?: number;
   },
 ): RealTrack[] {
   const dict = opts.dict ?? 'submission';
   const segs = a.chords[dict] ?? [];
   const key = inferKey(a, dict);
   const toTick = opts.bySecToTick;
+  // 一拍多少 tick —— 由拍号决定，不能假设 960（6/8 的一拍是八分 = 480）
+  const beatTicks = opts.beatTicks && opts.beatTicks > 0 ? opts.beatTicks : PPQ;
 
   /**
    * 和弦轨 —— **边界独立量化，相邻块共享边界**。
@@ -1058,7 +1161,8 @@ export function makeRealTracks(
    * 正确做法：把所有边界点**各自独立量化**，然后让相邻块共用同一个边界值。
    * 这样每块只受自己两端影响，不会把误差传给下一块。
    */
-  const TICKS_PER_BAR_LOCAL2 = 4 * PPQ;
+  // 和弦块「跨几个小节」的换算基准 —— 必须跟拍号一致（6/8 是 2880 不是 3840）
+  const TICKS_PER_BAR_LOCAL2 = barTicksOf(meterOf(a));
 
   /** 边界量化 + 可选小节吸附 */
   const q = (sec: number) => {
@@ -1072,7 +1176,7 @@ export function makeRealTracks(
     //
     // 编曲里和弦不会在半拍上换（swing 的八分音符除外，但那属于
     // 更细的量化，不在这一层处理）。所以先把边界拉回最近的整拍。
-    const beatTick = PPQ;
+    const beatTick = beatTicks;
     const nearestBeat = Math.round(tick / beatTick) * beatTick;
     // 阈值 0.4 拍：超过这个值说明真的在切分位置，不该动
     if (Math.abs(nearestBeat - tick) <= 0.4 * beatTick) tick = nearestBeat;
@@ -1113,7 +1217,7 @@ export function makeRealTracks(
    * 两者独立。经过和弦（如 5/7）通常 1–2 拍，不该被合并。
    */
   const minBeats = opts.minBeats ?? 1;
-  const minTicks = minBeats * PPQ;
+  const minTicks = minBeats * beatTicks;
   const cleaned: number[] = [bounds[0] ?? 0];
   for (let i = 1; i < bounds.length; i++) {
     const prev = cleaned[cleaned.length - 1];
@@ -1221,7 +1325,8 @@ export function makeRealTracks(
    * 判定方式：整份分析为空 ⇔ 没有小节也没有和弦。此时结构轨必须是空的。
    * （有分析结果但恰好没有结构段时，才回退到手工参考，那种情况是有意义的。）
    */
-  const TICKS_PER_BAR_LOCAL = 4 * PPQ;
+  // 结构段从 bar 号换 tick，基准同样要按拍号（6/8 → 2880）
+  const TICKS_PER_BAR_LOCAL = barTicksOf(meterOf(a));
   const normalized = normalizeSections(a);
   const autoSections = normalized;
   const analysisIsEmpty = a.downbeatsSec.length === 0 && (a.chords['submission'] ?? []).length === 0;

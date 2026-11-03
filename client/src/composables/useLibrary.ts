@@ -28,6 +28,7 @@ import {
   analyzeSong,
   deleteSong,
   importAudio,
+  importFbsong,
   isTauri,
   listSongs,
   loadAnalysis,
@@ -43,6 +44,9 @@ import {
 export type ProgressMap = Record<string, { stage: string; pct: number; message: string }>;
 
 const AUDIO_EXTENSIONS = ['flac', 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'opus', 'wma'];
+
+/** 工程文件扩展名（分析结果 + 用户编辑层，不含音频） */
+const PROJECT_EXT = 'fbsong';
 
 export function useLibrary() {
   const songs = ref<SongListItem[]>([]);
@@ -153,8 +157,13 @@ export function useLibrary() {
     const picked = await open({
       multiple: true,
       directory: false,
-      title: '添加音乐',
-      filters: [{ name: '音频文件', extensions: AUDIO_EXTENSIONS }],
+      title: '添加音乐（音频或 .fbsong 工程）',
+      filters: [
+        // 主过滤器同时收两种：用户不必先想清楚「我这是音频还是工程」
+        { name: '音频与工程文件', extensions: [...AUDIO_EXTENSIONS, PROJECT_EXT] },
+        { name: '音频文件', extensions: AUDIO_EXTENSIONS },
+        { name: '工程文件 (.fbsong)', extensions: [PROJECT_EXT] },
+      ],
     });
     if (!picked) return;
 
@@ -162,6 +171,14 @@ export function useLibrary() {
     busy.value = true;
     try {
       for (const p of paths) {
+        // ---- .fbsong 工程：分析结果已经在文件里，**不要再分析一遍** ----
+        if (p.toLowerCase().endsWith('.' + PROJECT_EXT)) {
+          const item = await importFbsong(p);
+          await refresh();
+          // 直接打开：谱面/歌词/手改都在，只差音频（可点「音频失效」补上）
+          await select(item.id);
+          continue;
+        }
         const item = await importAudio(p);
         await refresh();
         // 自动开始分析（不等待，后台跑）

@@ -48,6 +48,8 @@ const emit = defineEmits<{
    * 而不是留一个点了没反应的按钮。
    */
   (e: 'reanalyze-segment'): void;
+  /** 改片段文本（歌词轨用；和弦/段落各有专用入口） */
+  (e: 'set-label', text: string): void;
 }>();
 
 const tab = ref<'detail' | 'alternatives' | 'notes'>('detail');
@@ -120,6 +122,30 @@ const isAmbiguous = computed(() => {
   return a[1].prob > 0 && a[0].prob / a[1].prob < 1.5;
 });
 
+/**
+ * 歌词文本的就地编辑。
+ *
+ * 用本地 ref + 提交式（回车/失焦）而不是直接 v-model 到 props：
+ * 每敲一个字就写一次编辑层会塞满撤销栈（Ctrl+Z 要按 10 次才退掉一句）。
+ */
+const lyricDraft = ref('');
+watch(
+  () => [props.clip?.kind, props.clip?.label],
+  () => {
+    if (props.clip?.kind === 'lyric') lyricDraft.value = props.clip.label;
+  },
+  { immediate: true },
+);
+
+function commitLyric() {
+  const next = lyricDraft.value.trim();
+  if (!next || next === props.clip?.label) {
+    lyricDraft.value = props.clip?.label ?? '';
+    return;
+  }
+  emit('set-label', next);
+}
+
 /** 假的和声关系索引（PRD §5.4） */
 const relations = [
   { type: '前置', chord: 'E:min7', count: 12 },
@@ -154,6 +180,18 @@ const relations = [
             </div>
           </div>
 
+          <!-- 歌词文本（只有歌词轨有） -->
+          <div v-if="clip.kind === 'lyric'" class="section">
+            <div class="section-title">歌词</div>
+            <input
+              v-model="lyricDraft"
+              class="lyric-input"
+              placeholder="输入这一句歌词"
+              @keydown.enter.prevent="commitLyric"
+              @blur="commitLyric"
+            />
+          </div>
+
           <!-- 时间信息 -->
           <div class="section">
             <div class="section-title">时间</div>
@@ -163,8 +201,8 @@ const relations = [
             <div class="kv muted"><span>原始秒数</span><b>{{ fmt(clip.rawStartSec ?? 0) }}</b></div>
           </div>
 
-          <!-- 来源 -->
-          <div class="section">
+          <!-- 来源（歌词没有模型来源，不显示这一块） -->
+          <div v-if="clip.kind !== 'lyric'" class="section">
             <div class="section-title">来源</div>
             <div class="kv"><span>模型</span><b>{{ clip.source ?? 'lv-chordia s0-s4' }}</b></div>
             <div class="kv">
@@ -340,6 +378,21 @@ const relations = [
   padding: 12px 12px 10px;
   border-bottom: 1px solid var(--border);
 }
+.lyric-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  outline: none;
+}
+.lyric-input:focus {
+  border-color: var(--accent-dim);
+  background: #fff;
+}
+
 .insp-chord {
   font-size: 19px;
   font-weight: 600;

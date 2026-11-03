@@ -1,27 +1,19 @@
 /**
  * 导出功能的测试。
  *
- * ## 两种导出的定位
+ * 核心要求只有一条：**`.fbsong` 一个字段都不能少**（能无损还原一首歌）。
  *
- * | 格式 | 给谁 | 特点 |
- * |---|---|---|
- * | 讲解 Markdown | 人看 | 丢掉精度换可读性 |
- * | `.fbsong` | 程序看 | 完整 JSON，不裁任何字段 |
- *
- * 所以测试也分两类：
- *   - 讲解稿：**信息要在**（标题、调性、结构、和弦、级数）
- *   - `.fbsong`：**一个字段都不能少**（能无损还原一首歌）
+ * （曾经还有个「导出讲解稿（Markdown）」，用户要求去掉了。）
  */
 import { describe, expect, it } from 'vitest';
 import {
   FBSONG_FORMAT,
   FBSONG_VERSION,
   buildFbsongBundle,
-  buildLectureMarkdown,
   serializeFbsong,
   suggestFileName,
 } from './exporters';
-import type { AnalysisFile, RealTrack } from '../timeline/demo/realData';
+import type { AnalysisFile } from '../timeline/demo/realData';
 
 /** 造一个最小但完整的分析对象 */
 function fakeAnalysis(over: Partial<AnalysisFile> = {}): AnalysisFile {
@@ -45,108 +37,7 @@ function fakeAnalysis(over: Partial<AnalysisFile> = {}): AnalysisFile {
   } as unknown as AnalysisFile;
 }
 
-const chordTrack: RealTrack = {
-  id: 'tr-chord',
-  kind: 'chord',
-  name: '绝对和弦',
-  visible: true,
-  clips: [
-    { id: 'c1', startTick: 0, endTick: 3840, label: 'G:maj7' },
-    { id: 'c2', startTick: 3840, endTick: 7680, label: 'A:min7' },
-    { id: 'c3', startTick: 7680, endTick: 11520, label: 'D:7' },
-  ],
-};
 
-describe('buildLectureMarkdown', () => {
-  const md = () =>
-    buildLectureMarkdown({
-      analysis: fakeAnalysis(),
-      tracks: [chordTrack],
-      key: { tonic: 'G', mode: 'major' },
-      keyIsManual: false,
-      bpm: 90.2,
-    });
-
-  it('有标题、曲名、artist', () => {
-    const s = md();
-    expect(s).toContain('# 何なんw (WTF lol)');
-    expect(s).toContain('藤井风');
-  });
-
-  it('有调性，并标明是自动推断还是手动', () => {
-    expect(md()).toContain('**G 大调**（自动推断）');
-    const manual = buildLectureMarkdown({
-      analysis: fakeAnalysis(),
-      tracks: [chordTrack],
-      key: { tonic: 'D', mode: 'minor' },
-      keyIsManual: true,
-      bpm: 90.2,
-    });
-    expect(manual).toContain('**D 小调**（手动指定）');
-  });
-
-  it('概览行包含 BPM / 小节 / 和弦段数', () => {
-    const s = md();
-    expect(s).toMatch(/90\.2 BPM/);
-    expect(s).toMatch(/5 小节/);
-    expect(s).toMatch(/3 个和弦段/);
-  });
-
-  it('结构表带段落名和小节区间', () => {
-    const s = md();
-    expect(s).toContain('| Intro |');
-    expect(s).toContain('| Verse |');
-  });
-
-  it('和弦进行里带级数（G 大调下 G:maj7 = 1:maj7）', () => {
-    const s = md();
-    expect(s).toContain('G:maj7 (1:maj7)');
-  });
-
-  it('同一和弦连续出现会合并成 ×N（避免一堆重复行）', () => {
-    const repeated: RealTrack = {
-      ...chordTrack,
-      clips: [
-        { id: 'c1', startTick: 0, endTick: 960, label: 'G:maj7' },
-        { id: 'c2', startTick: 960, endTick: 1920, label: 'G:maj7' },
-        { id: 'c3', startTick: 1920, endTick: 2880, label: 'G:maj7' },
-      ],
-    };
-    const s = buildLectureMarkdown({
-      analysis: fakeAnalysis({ sections: [] }),
-      tracks: [repeated],
-      key: { tonic: 'G', mode: 'major' },
-      keyIsManual: false,
-      bpm: 90.2,
-    });
-    expect(s).toMatch(/G:maj7.*×3/);
-  });
-
-  it('没有和弦时不崩，给出提示', () => {
-    const s = buildLectureMarkdown({
-      analysis: fakeAnalysis({ chords: { submission: [] } } as Partial<AnalysisFile>),
-      tracks: [{ ...chordTrack, clips: [] }],
-      key: { tonic: 'G', mode: 'major' },
-      keyIsManual: false,
-      bpm: 90.2,
-    });
-    expect(s).toContain('还没有和弦数据');
-  });
-
-  it('调音校正信息会写进讲解（用户需要知道移调了）', () => {
-    const s = buildLectureMarkdown({
-      analysis: fakeAnalysis({
-        tuning: { deviationCents: -34.7, corrected: true },
-      } as Partial<AnalysisFile>),
-      tracks: [chordTrack],
-      key: { tonic: 'G', mode: 'major' },
-      keyIsManual: false,
-      bpm: 90.2,
-    });
-    expect(s).toContain('-35 音分');
-    expect(s).toContain('移调');
-  });
-});
 
 describe('buildFbsongBundle', () => {
   it('完整保留分析结果（一字段不删）', () => {
@@ -202,6 +93,55 @@ describe('buildFbsongBundle', () => {
     const back = JSON.parse(text);
     expect(back.format).toBe(FBSONG_FORMAT);
     expect(back.analysis.song.title).toBe('何なんw (WTF lol)');
+  });
+});
+
+describe('.fbsong 包含用户编辑层', () => {
+  it('歌词轨 / 级数轨 / 调性 / 和弦编辑都随工程导出', () => {
+    const edits = {
+      key: { tonic: 'F#', mode: 'minor' as const },
+      degreeTracks: [{ id: 'deg-1', tonic: 'A', mode: 'major' as const }],
+      lyricTracks: [
+        {
+          id: 'lyr-1',
+          name: '歌词',
+          clips: [
+            { id: 'ly-0', startTick: 0, endTick: 3840, text: '我们 变成一对 差点缘分' },
+            { id: 'ly-1', startTick: 3840, endTick: 7680, text: '装成朋友少点天分' },
+          ],
+        },
+      ],
+      sections: {
+        clips: [{ id: 'sec-0', startTick: 0, endTick: 15360, label: 'Intro' }],
+      },
+    };
+
+    const bundle = buildFbsongBundle({
+      analysis: fakeAnalysis(),
+      edits,
+      key: { tonic: 'G', mode: 'major' },
+      bpm: 129.7,
+    });
+
+    // 序列化 → 反序列化，模拟「存盘后在别的机器上打开」
+    const roundTrip = JSON.parse(serializeFbsong(bundle));
+
+    expect(roundTrip.edits.lyricTracks).toHaveLength(1);
+    expect(roundTrip.edits.lyricTracks[0].name).toBe('歌词');
+    expect(roundTrip.edits.lyricTracks[0].clips.map((c: { text: string }) => c.text)).toEqual([
+      '我们 变成一对 差点缘分',
+      '装成朋友少点天分',
+    ]);
+    // 歌词块的时间也要原样保留（否则导入后位置全乱）
+    expect(roundTrip.edits.lyricTracks[0].clips[1]).toMatchObject({
+      startTick: 3840,
+      endTick: 7680,
+    });
+    // 其他编辑层不受影响
+    expect(roundTrip.edits.degreeTracks).toHaveLength(1);
+    expect(roundTrip.edits.key).toEqual({ tonic: 'F#', mode: 'minor' });
+    // 分析结果原样
+    expect(roundTrip.analysis.chords.submission).toHaveLength(3);
   });
 });
 

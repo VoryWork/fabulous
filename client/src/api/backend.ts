@@ -114,6 +114,33 @@ export interface SongEdits {
     }[];
   };
   /**
+   * 用户导入 / 创建的**歌词轨**。
+   *
+   * ## 为什么存 edits 而不是 analysis.json
+   *
+   * analysis.json 是模型产物：重新分析会整份覆盖。歌词是用户的东西
+   * （导入的 LRC 或手打的），必须活得比分析结果长 —— 和 `sections` /
+   * `degreeTracks` 同一条原则。落盘位置就是这首歌的 edits.json，
+   * 内容仍是纯 JSON，体积可以忽略（一首歌 50 句 ≈ 4KB）。
+   *
+   * ## 为什么是数组
+   *
+   * 和级数轨一样支持多条：可以同时放「中文歌词」「罗马音」「翻译」。
+   * 第一版 UI 只暴露一条「添加歌词轨」，但数据结构不锁死。
+   */
+  lyricTracks?: {
+    id: string;
+    /** 轨道名（默认「歌词」；导入时可用 LRC 的 ti 标签） */
+    name?: string;
+    clips: {
+      id: string;
+      startTick: number;
+      endTick: number;
+      /** 歌词文本（一句话） */
+      text: string;
+    }[];
+  }[];
+  /**
    * 用户编辑过的**歌曲结构**（段落划分 + 每段调性）。
    *
    * ## 为什么不绑 `basedOn` 指纹（和 `chordEdit` 不一样）
@@ -231,4 +258,24 @@ export function onAnalysisFailed(
  */
 export async function writeTextFile(path: string, content: string): Promise<void> {
   return invoke<void>('write_text_file', { path, content });
+}
+
+/**
+ * 导入 `.fbsong` 工程文件（分析结果 + 用户编辑层，不含音频）。
+ *
+ * 导入后音频路径是空的 → 后端把它标成 `missing_audio`，
+ * 列表里显示「音频失效」，点一下就能走已有的「重新指定音频」流程。
+ */
+export async function importFbsong(path: string): Promise<SongListItem> {
+  return invoke<SongListItem>('import_fbsong', { path });
+}
+
+/**
+ * 读一个纯文本文件（歌词导入用）。
+ *
+ * 路径由前端 `dialog.open()` 得到（用户亲手选的位置）。
+ * 后端会挡掉超大文件，避免误选视频/二进制后被整个读进内存。
+ */
+export async function readTextFile(path: string): Promise<string> {
+  return invoke<string>('read_text_file', { path });
 }
