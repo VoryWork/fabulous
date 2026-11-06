@@ -172,6 +172,32 @@ cd client/src-tauri && cargo test --lib    # Rust 92 例（含与 Python 的逐�
 | [all-in-one-infer](https://github.com/openmirlab/all-in-one-infer) | 段落结构（仅 Python 对照链路） | MIT | ❌ 权重首次运行自取 |
 | [demucs-infer](https://github.com/openmirlab/demucs-infer) | 源分离（可选） | MIT | ❌ 权重首次运行自取 |
 
+### MStruct 格式与官方编辑器
+
+`.mstruct` 导出格式（`client/src/export/mstruct.ts`）对齐
+[MStruct Editor](https://github.com/Polymath9/mstruct-editor) 的官方实现。
+上游是**分层许可**，这里逐条说明我们用到的是哪一层：
+
+| 上游内容 | 我们怎么用 | 许可 | 义务 |
+|---|---|---|---|
+| 软件源码，含 `src/core/mstruct-document.js` 的 `serializeMstructDocument()` | 照抄实现（文件骨架、`{TAG}value` 元数据行格式、槽位时值合并规则） | [MIT](https://github.com/Polymath9/mstruct-editor/blob/master/LICENSE) | 保留版权与许可声明 |
+| 语法文档、技术手册、`examples/*.mstruct` 原创分析 | 参考语法规则与示例 | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | 署名「MStruct Editor contributors」，注明来源文件/版本，说明有修改 |
+| MStruct / MStruct Archive **名称、Logo、官方兼容标识** | **未使用** | ❌ 不在任何开源授权内 | 保留品牌权利 |
+
+版权行：
+
+- 软件源码：`Copyright (c) 2026 MStruct Editor contributors`
+- 文档与分析：`Copyright © 2026 MStruct Editor contributors`（CC BY 4.0）
+
+> ⚠️ **名称与标识不在授权范围内。** 上游 `LICENSE-SCOPE.md` 明确：MIT 不覆盖
+> 「MStruct、MStruct Archive 的名称、Logo 与官方兼容标识」，
+> 且「随官方软件分发不代表授予独立品牌使用权」。
+> 所以我们只能说「**导出格式兼容 MStruct**」，不宣称自己是 MStruct 官方产品、
+> 不使用其 Logo，也不暗示得到官方背书。`MStruct` 仅作为格式名称（factual 引用）出现。
+
+> 上游技术手册另以 DOI [10.5281/zenodo.23637500](https://doi.org/10.5281/zenodo.23637500) 发布，
+> 引用该 DOI 不构成对其中内容的再分发。
+
 Rust 依赖里有 17 个 crate 是 **MPL-2.0**（`cssparser` 等，来自 Tauri 的 CSS 解析）。
 它们是用 crates.io 原版、未做修改，MPL 只覆盖这些文件本身，不影响本项目的 MIT 许可；
 分发二进制时按 MPL §3.2 指明源码位置即可（crate 名与版本见 NOTICE 文件）。

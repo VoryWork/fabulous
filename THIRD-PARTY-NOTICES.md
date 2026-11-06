@@ -90,7 +90,24 @@ SOFTWARE.
 
 这些项目都是 MIT 许可（版权行见各自 LICENSE / NOTICE 文件）。
 
-## 3. 需要留意的许可条款
+## 3. MStruct 格式与官方编辑器
+
+`.mstruct` 导出格式（`client/src/export/mstruct.ts`）对齐 [MStruct Editor](https://github.com/Polymath9/mstruct-editor) 的官方实现。上游是**分层许可**：
+
+| 上游内容 | 本项目怎么用 | 许可 | 义务 |
+|---|---|---|---|
+| 软件源码，含 `src/core/mstruct-document.js` 的 `serializeMstructDocument()` | 照抄实现（文件骨架、元数据行格式、槽位时值合并规则） | [MIT](https://github.com/Polymath9/mstruct-editor/blob/master/LICENSE) | 保留版权与许可声明 |
+| 语法文档、技术手册、`examples/*.mstruct` 原创分析 | 参考语法规则与示例 | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | 署名 MStruct Editor contributors，注明来源文件/版本，说明有修改 |
+| MStruct / MStruct Archive 的**名称、Logo、官方兼容标识** | **未使用** | ❌ 不在任何开源授权内 | 保留品牌权利 |
+
+- 软件源码版权行：`Copyright (c) 2026 MStruct Editor contributors`
+- 文档与分析版权行：`Copyright © 2026 MStruct Editor contributors`（CC BY 4.0）
+
+> ⚠️ **名称与标识不在授权范围内。** 上游 `LICENSE-SCOPE.md` 明确：MIT 不覆盖「MStruct、MStruct Archive 的名称、Logo 与官方兼容标识」，且「随官方软件分发不代表授予独立品牌使用权」。本项目只宣称「导出格式兼容 MStruct」，不宣称自己是官方产品、不使用其 Logo，也不暗示得到官方背书。
+
+> 上游技术手册另以 DOI [10.5281/zenodo.23637500](https://doi.org/10.5281/zenodo.23637500) 发布，引用该 DOI 不构成对其中内容的再分发。
+
+## 4. 需要留意的许可条款
 
 **MPL-2.0** — 文件级弱 copyleft。我们使用 crates.io 上的原版、未做修改，也没有把它们的代码混进我们自己的源文件，所以 MPL 只覆盖那些文件本身，不影响本项目的许可。按 MPL §3.2，分发二进制时应能指明对应源码位置 —— 下表给出了 crate 名与版本，源码都在 https://crates.io 上可查（同名同版本）。
 
@@ -98,7 +115,7 @@ SOFTWARE.
 
 **Apache-2.0** — 含专利授权条款；若某依赖同时给出 `MIT OR Apache-2.0`，我们按 MIT 履行义务。
 
-## 4. Rust 依赖（537 个 crate）
+## 5. Rust 依赖（537 个 crate）
 
 | crate | 版本 | 许可 |
 |---|---|---|
@@ -640,7 +657,7 @@ SOFTWARE.
 | zvariant_derive | 5.15.1 | MIT |
 | zvariant_utils | 4.2.0 | MIT |
 
-## 5. 前端 (npm) 依赖（141 个包）
+## 6. 前端 (npm) 依赖（141 个包）
 
 | 包 | 版本 | 许可 |
 |---|---|---|
@@ -786,6 +803,6 @@ SOFTWARE.
 | xml-name-validator | 5.0.0 | Apache-2.0 |
 | xmlchars | 2.2.0 | MIT |
 
-## 6. 音频与测试数据
+## 7. 音频与测试数据
 
 本仓库与发布包**都不包含任何音频文件**。`testdata/` 里只有我们自己跑出来的分析结果（`analysis.json` 等），不含原始录音。参考音频属于各自的版权方，需要使用者自备。

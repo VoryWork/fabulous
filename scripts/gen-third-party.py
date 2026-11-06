@@ -85,6 +85,38 @@ MODELS_NOT_SHIPPED = [
     },
 ]
 
+# ------------------------------------------------------- MStruct 格式与官方编辑器
+# 我们**不分发**它的代码或权重，但 client/src/export/mstruct.ts 是照抄官方序列化器
+# 的实现（文件骨架、{TAG}value 元数据行、槽位时值合并规则），所以必须保留声明。
+# 上游是分层许可：软件 MIT / 文档与示例分析 CC BY 4.0 / 名称与 Logo 不授权。
+# 依据：LICENSE-SCOPE.md（master 分支）
+MSTRUCT = {
+    "repo": "https://github.com/Polymath9/mstruct-editor",
+    "doi": "10.5281/zenodo.23637500",
+    "code_copyright": "Copyright (c) 2026 MStruct Editor contributors",
+    "doc_copyright": "Copyright © 2026 MStruct Editor contributors",
+    "layers": [
+        {
+            "what": "软件源码，含 `src/core/mstruct-document.js` 的 `serializeMstructDocument()`",
+            "use": "照抄实现（文件骨架、元数据行格式、槽位时值合并规则）",
+            "license": "[MIT](https://github.com/Polymath9/mstruct-editor/blob/master/LICENSE)",
+            "duty": "保留版权与许可声明",
+        },
+        {
+            "what": "语法文档、技术手册、`examples/*.mstruct` 原创分析",
+            "use": "参考语法规则与示例",
+            "license": "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)",
+            "duty": "署名 MStruct Editor contributors，注明来源文件/版本，说明有修改",
+        },
+        {
+            "what": "MStruct / MStruct Archive 的**名称、Logo、官方兼容标识**",
+            "use": "**未使用**",
+            "license": "❌ 不在任何开源授权内",
+            "duty": "保留品牌权利",
+        },
+    ],
+}
+
 # ------------------------------------------------------------- 需要提示的许可
 # 这些许可对分发方式有额外要求，单独说明，免得读者以为「都是 MIT」。
 LICENSE_NOTES = [
@@ -221,17 +253,40 @@ def render(model_licenses: dict[str, str]) -> str:
     L.append("")
     L.append("这些项目都是 MIT 许可（版权行见各自 LICENSE / NOTICE 文件）。")
     L.append("")
+    # 3. MStruct 格式与官方编辑器（不随包分发，但是照抄了实现）
+    L.append("## 3. MStruct 格式与官方编辑器")
+    L.append("")
+    L.append("`.mstruct` 导出格式（`client/src/export/mstruct.ts`）对齐 [MStruct Editor]"
+             f"({MSTRUCT['repo']}) 的官方实现。上游是**分层许可**：")
+    L.append("")
+    L.append("| 上游内容 | 本项目怎么用 | 许可 | 义务 |")
+    L.append("|---|---|---|---|")
+    for row in MSTRUCT["layers"]:
+        L.append(f"| {row['what']} | {row['use']} | {row['license']} | {row['duty']} |")
+    L.append("")
+    L.append(f"- 软件源码版权行：`{MSTRUCT['code_copyright']}`")
+    L.append(f"- 文档与分析版权行：`{MSTRUCT['doc_copyright']}`（CC BY 4.0）")
+    L.append("")
+    L.append(f"> ⚠️ **名称与标识不在授权范围内。** 上游 `LICENSE-SCOPE.md` 明确：MIT 不覆盖"
+             f"「MStruct、MStruct Archive 的名称、Logo 与官方兼容标识」，"
+             f"且「随官方软件分发不代表授予独立品牌使用权」。"
+             f"本项目只宣称「导出格式兼容 MStruct」，不宣称自己是官方产品、"
+             f"不使用其 Logo，也不暗示得到官方背书。")
+    L.append("")
+    L.append(f"> 上游技术手册另以 DOI [{MSTRUCT['doi']}](https://doi.org/{MSTRUCT['doi']}) 发布，"
+             f"引用该 DOI 不构成对其中内容的再分发。")
+    L.append("")
 
     # 3. 许可注意事项
-    L.append("## 3. 需要留意的许可条款")
+    L.append("## 4. 需要留意的许可条款")
     L.append("")
     for lic, note in LICENSE_NOTES:
         L.append(f"**{lic}** — {note}")
         L.append("")
 
-    # 4. Rust 依赖
+    # 5. Rust 依赖
     rust = rust_packages()
-    L.append(f"## 4. Rust 依赖（{len(rust)} 个 crate）")
+    L.append(f"## 5. Rust 依赖（{len(rust)} 个 crate）")
     L.append("")
     L.append("| crate | 版本 | 许可 |")
     L.append("|---|---|---|")
@@ -239,10 +294,10 @@ def render(model_licenses: dict[str, str]) -> str:
         L.append(f"| {p['name']} | {p['version']} | {p['license']} |")
     L.append("")
 
-    # 5. 前端依赖
+    # 6. 前端依赖
     npm = npm_packages()
     if npm:
-        L.append(f"## 5. 前端 (npm) 依赖（{len(npm)} 个包）")
+        L.append(f"## 6. 前端 (npm) 依赖（{len(npm)} 个包）")
         L.append("")
         L.append("| 包 | 版本 | 许可 |")
         L.append("|---|---|---|")
@@ -250,8 +305,8 @@ def render(model_licenses: dict[str, str]) -> str:
             L.append(f"| {p['name']} | {p['version']} | {p['license']} |")
         L.append("")
 
-    # 6. 音频与测试数据
-    L.append("## 6. 音频与测试数据")
+    # 7. 音频与测试数据
+    L.append("## 7. 音频与测试数据")
     L.append("")
     L.append(
         "本仓库与发布包**都不包含任何音频文件**。`testdata/` 里只有我们自己跑出来的分析结果"
