@@ -32,6 +32,7 @@ export interface ClipState {
   readonly startTick: number;
   readonly endTick: number;
   readonly label: string;
+
   readonly sublabel?: string;
   readonly state?: 'draft' | 'confirmed' | 'rejected';
   /** 分析层（多重解释用） */

@@ -76,8 +76,22 @@ const QUALITIES = new Set<string>([
   'maj7(#11)', 'maj7(#5)', 'maj7(9)',
   'maj9(#11)',
   'aug(7)', 'aug(b7)',
+  /**
+   * ---- 多变化音组合（模型词表里真实存在的 21 种）
+   *
+   * 之前只收了单变化音，结果模型输出 `C:7(b9,b13)` 时**校验直接拒绝**，
+   * 而这些恰恰是爵士/属性和声里最常用的写法。
+   * 来源：`neural/lv-chordia/lv_chordia/data/full_chord_list.txt` 实测提取。
+   */
+  '7(b9,#9)', '7(b9,#11)', '7(b9,b13)', '7(b13,#9)',
+  '11(b9,b13)',
+  'maj6(b7,11)',
+  'aug(b7,9)', 'aug(b7,b9)',
+  'sus4(b7,9)', 'sus4(b7,9,13)', 'sus4(b7,9,#11)', 'sus4(b13,b7)',
   '(1,5)', '(1)', '(3)', '(5)', '(6)', '(7)', '(b3)', '(b7)', '(11)', '(13)',
   '(1,4)', '(1,b3)', '(1,b7)',
+  '(b3,5)', '(b3,b7)', '(b5,11)',
+  '(b3,b7,11,9)', '(b5,b7,3)',
 ]);
 
 /**
@@ -199,11 +213,34 @@ export function validateChord(raw: string): ChordValidation {
 
   // 性质
   if (quality && !QUALITIES.has(quality)) {
-    return {
-      ok: false,
-      normalized: '',
-      error: `不支持的和弦性质「${quality}」`,
-    };
+    /**
+     * 词表外的组合也可能合法 —— 只要是「基础性质 + 若干变化音」的形状。
+     *
+     * ## 为什么不能只靠白名单
+     *
+     * `QUALITIES` 是从模型词表枚举出来的固定集合。用户手动输入或
+     * 未来模型升级时出现新组合（`13(b9,#11)`、`7(#9,b13)`）就会被判非法，
+     * 但它在音乐上完全成立，而且下游 `chordToNumber` 只关心**根音**，
+     * 后缀原样保留即可，不会被解析坏。
+     *
+     * ## 语法校验代替枚举校验
+     *
+     * 规则（贴合 lv-chordia 的实际写法）：
+     *   前缀   = 小写字母 + 数字（maj / min / sus4 / 11 / 7…，可为空）
+     *   变化音 = (b|#|*) + 音级号（2–15）
+     *   整体   = 前缀 `(` 变化音 [`,` 变化音]… `)`
+     *
+     * 这样 `7(b9,b13)`、`13(b9,#11)`、`sus4(b7,9,13)` 都能过，
+     * 而 `foo`、`H(9)`、`7(abc)` 仍被拒。
+     */
+    const syntaxOk = /^(?:[a-z0-9]*)\((?:(?:[b#*])\d{1,2})(?:,(?:[b#*])\d{1,2})*\)$/.test(quality);
+    if (!syntaxOk) {
+      return {
+        ok: false,
+        normalized: '',
+        error: `不支持的和弦性质「${quality}」`,
+      };
+    }
   }
   if (!quality && !inversion) {
     return { ok: false, normalized: '', error: '缺少和弦性质，例如 :maj' };

@@ -91,6 +91,7 @@ const emit = defineEmits<{
   (e: 'reset-key'): void;
   /** 导出工程文件（.fbsong，完整 JSON） */
   (e: 'export-fbsong'): void;
+  (e: 'export-mstruct'): void;
 }>();
 
 /** 调性选择弹层开关 */
@@ -339,6 +340,19 @@ const current = computed(() => DICT_INFO[dict.value]);
       @click="emit('export-fbsong')"
     >
       导出 .fbsong
+    </button>
+    <!--
+      MStruct 导出：给 MStruct 编译器读（mstruct-archive.com）。
+      和 .fbsong 不同：.fbsong 是我们自己的工程文件（JSON），
+      MStruct 是对外交流的分析文本格式。
+    -->
+    <button
+      class="act-btn"
+      :disabled="!canExport"
+      title="导出为 MStruct 分析文件（.mstruct，可直接导入 mstruct-archive.com 编辑器）"
+      @click="emit('export-mstruct')"
+    >
+      导出 MStruct
     </button>
 
     <!--

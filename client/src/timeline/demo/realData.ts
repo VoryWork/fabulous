@@ -141,6 +141,7 @@ export interface RealClip {
   state?: 'draft' | 'confirmed' | 'rejected';
   confidence?: number;
   parentId?: string;
+
   /** 备选和弦（来自模型的概率分布，最多 5 个，含当前选中的） */
   alternatives?: Array<ChordAlternative>;
   /**
@@ -647,6 +648,22 @@ const PITCH: Record<string, number> = {
 
 const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
 
+/**
+ * 自然小调音阶（相对主音的半音数）。
+ *
+ * ## 为什么主调级数要按调式的音阶编号，而不是统一按大调
+ *
+ * 用户明确要求：「用户如果选的是 D minor，则 D minor 的级数放在前面」。
+ *
+ * d 小调里的 `Bb:maj` 是**常用的 VI 级**。如果统一按大调尺子编号，
+ * 它会算成 `b7`（大调第 7 级降半音）—— 数字没错但完全不是用户
+ * 在小调语境下想看到的东西，而且 `b7` 在小调里通常指 C（VII 级）。
+ *
+ * 按自然小调编号后： d 小调 → D=1 E=2 F=3 G=4 A=5 Bb=6 C=7，
+ * 和 `i–ii°–III–iv–v–VI–VII` 一一对应。
+ */
+const NATURAL_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
+
 /** 音高 → 降号写法（流行乐谱更常用降号：Ab 而非 G#） */
 const FLAT_NAMES: Record<number, string> = {
   1: 'Db', 3: 'Eb', 6: 'Gb', 8: 'Ab', 10: 'Bb',
@@ -663,13 +680,25 @@ const CHORD_DEGREE_SEMITONES: Record<string, number> = {
  *
  * 例如 G 大调下：G→1, A→2, B→3, C→4, D→5, E→6, F#→7, F→b7。
  */
-function noteToNumber(note: string, tonic: string): string | null {
+function noteToNumber(
+  note: string,
+  tonic: string,
+  mode: 'major' | 'minor' = 'major',
+): string | null {
   const r = PITCH[note];
   const t = PITCH[tonic];
   if (r == null || t == null) return null;
 
   const interval = (r - t + 12) % 12;
-  const idx = MAJOR_SCALE.indexOf(interval);
+  /**
+   * 用**所选调式的音阶**当编号基准。
+   *
+   * 大调 → MAJOR_SCALE，d 小调里 Bb 是 6（VI 级）而不是 b7。
+   * 变化音的 b/# 前缀也相对同一个音阶算，所以小调里 `#4` 指的是
+   * 小调第 4 级（G）升半音，语义和谱面一致。
+   */
+  const SCALE = mode === 'minor' ? NATURAL_MINOR_SCALE : MAJOR_SCALE;
+  const idx = SCALE.indexOf(interval);
   if (idx >= 0) return String(idx + 1);
 
   /**
@@ -687,12 +716,12 @@ function noteToNumber(note: string, tonic: string): string | null {
    * 惯例优先降号（b2 比 #1 更常见于功能和声分析）。
    */
   // 先找降号：比某个音级低半音
-  for (let i = 0; i < MAJOR_SCALE.length; i++) {
-    if ((MAJOR_SCALE[i] - interval + 12) % 12 === 1) return `b${i + 1}`;
+  for (let i = 0; i < SCALE.length; i++) {
+    if ((SCALE[i] - interval + 12) % 12 === 1) return `b${i + 1}`;
   }
   // 再找升号：比某个音级高半音
-  for (let i = MAJOR_SCALE.length - 1; i >= 0; i--) {
-    if ((interval - MAJOR_SCALE[i] + 12) % 12 === 1) return `#${i + 1}`;
+  for (let i = SCALE.length - 1; i >= 0; i--) {
+    if ((interval - SCALE[i] + 12) % 12 === 1) return `#${i + 1}`;
   }
   return null;
 }
@@ -710,7 +739,19 @@ function noteToNumber(note: string, tonic: string): string | null {
  * **不简化**：`:maj` / `:min7` / `:7` / `:sus4` 等性质全部保留，
  * 因为 `6:min7` 和 `6` 在功能和声上是两回事。
  */
-export function chordToNumber(chord: string, tonic: string): string | null {
+export function chordToNumber(
+  chord: string,
+  tonic: string,
+  /**
+   * 这条轨用的调式 —— 决定**按哪个音阶编号**。
+   *
+   * 用户明确要求：「用户如果选的是 D minor，则 D minor 的级数放在前面」。
+   * 所以 d 小调轨上的 `Bb:maj` 显示 `6:maj`（VI 级），不是大调尺子的 `b7:maj`。
+   *
+   * 默认 `'major'` 保持向后兼容：老调用方（和弦轨、测试）语义不变。
+   */
+  mode: 'major' | 'minor' = 'major',
+): string | null {
   if (!chord) return null;
   if (chord === 'N') return 'N';
 
@@ -735,7 +776,7 @@ export function chordToNumber(chord: string, tonic: string): string | null {
   }
 
   const root = rootOnly;
-  const rootNum = noteToNumber(root, tonic);
+  const rootNum = noteToNumber(root, tonic, mode);
   if (!rootNum) return null;
 
   let out = rootNum;
@@ -749,7 +790,7 @@ export function chordToNumber(chord: string, tonic: string): string | null {
     if (semis != null && rootPitch != null) {
       const bassPitch = (rootPitch + semis) % 12;
       const bassNote = Object.keys(PITCH).find((k) => PITCH[k] === bassPitch);
-      const bassNum = bassNote ? noteToNumber(bassNote, tonic) : null;
+      const bassNum = bassNote ? noteToNumber(bassNote, tonic, mode) : null;
       out += `/${bassNum ?? inversion}`;
     } else {
       // 不认识的转位记号（如 /1），原样保留
@@ -762,6 +803,137 @@ export function chordToNumber(chord: string, tonic: string): string | null {
 
 /** 兼容旧名（罗马数字版已弃用，保留导出避免破坏引用） */
 export const chordToDegree = chordToNumber;
+
+
+
+
+/**
+ * 关系调的**显示标签**（给级数块的小字用）。
+ *
+ * 大调轨 → 「关系小调」（C 大调轨 → 关系小调）
+ * 小调轨 → 「关系大调」（d 小调轨 → 关系大调）
+ *
+ * ## 为什么只写「关系大/小调」，不写调名
+ *
+ * 用户的原话：「不要写关系 xxx，直接关系大/关系小」。
+ *
+ * 调名（`F major` / `A minor`）在块上其实没用 —— 它只是把
+ * 同一件事换个说法，而块宽只有几十像素，写全了必然被省略号截掉。
+ * 「关系大调 4」让人一眼知道「这个数字是换到关系大调看的 4 级」，
+ * 而「关系 F major 4」要多读半秒才能反应过来 F major 是什么调。
+ *
+ * 想确认具体调名时还有 `title` 悬浮提示（见 `relativeKeyHint`）。
+ */
+export function relativeTonicOf(tonic: string, mode: 'major' | 'minor'): string {
+  void tonic;
+  return mode === 'major' ? '关系小调' : '关系大调';
+}
+
+/**
+ * 关系调的**完整调名**（`title` 悬浮提示用）。
+ *
+ * 和 `relativeTonicOf` 分工：块上只放「关系大/小调」四个字，
+ * 具体是哪个调（`F major`）靠悬浮提示给出 —— 主级数 0.5 秒能读懂，
+ * 调名需要时才查。
+ *
+ * 关系主音：大调下移 3 个半音（+9），小调上移 3 个半音（+3）。
+ */
+export function relativeKeyName(tonic: string, mode: 'major' | 'minor'): string {
+  const t = PITCH[tonic];
+  if (t == null) return '';
+  const semis = mode === 'major' ? (t + 9) % 12 : (t + 3) % 12;
+  /**
+   * 主音名取降号写法（和 `KEY_TONICS` 归一方向一致），但 **6 例外**：
+   * 关系小调最常出现的就是 6（A 大调 → F# 小调、D 大调 → B 小调），
+   * 而 `FLAT_NAMES` 里 6 是 `Gb` —— 写成「Gb minor」会让用户以为
+   * 这是一个从没见过的调。乐理惯例是 F# 小调，所以这里用升号。
+   */
+  const KEY_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const name = KEY_NAMES[semis] ?? '';
+  return `${name} ${mode === 'major' ? 'minor' : 'major'}`;
+}
+/**
+ * 关系大小调视角下的**第几级**。
+ *
+ * ## 用户要的东西
+ *
+ * 「如果用户选了大小调，能不能显式是关系大小调的第几级」
+ *
+ * 场景：C 大调的 `A:min` 是 vi。但如果用户其实认为这首歌是 a 小调，
+ * 这个和弦在他的视角里是 **1 级** —— 两个视角的和弦完全相同。
+ * 所以块上同时标：C 大调下 6，关系小调视角下 1。
+ *
+ * ## 算法
+ *
+ * 1. 换主音：大调轨下移 3 个半音（到关系小调），小调轨上移 3 个半音（到关系大调）
+ * 2. 算和弦相对**新主音**的音程 = `semi - 关系主音音程`
+ * 3. 用**关系调自己的调式音阶**编号
+ *
+ * 第 3 步是关键：关系调是小调就用自然小调音阶编号。
+ * 这样两个数字都落在各自的自然音级上（不会出现 `b7` 这种
+ * 在小调里本来是自然音级、却带降号的写法），
+ * 和 `chordToNumber` 的规则完全一致。
+ *
+ * ## 关于 b/#
+ *
+ * 不在关系调音阶里的音才补 `b`/`#` 前缀（先找降号，再找升号）。
+ *
+ * @param chord  和弦名（`C:maj` / `E:min7` / `N`）
+ * @param tonic  这条轨自己的主音
+ * @param mode   这条轨的调式（决定关系主音往哪个方向移）
+ * @returns 1–7 或带 b/# 的变音级；解析不出来返回 null
+ */
+export function relativeDegree(
+  chord: string,
+  tonic: string,
+  mode: 'major' | 'minor',
+): string | null {
+  /**
+   * 和弦根音相对主音的半音数（0–11）。
+   *
+   * 这个计算本来抽成了 `chordToSemitones`，但那个函数只服务于已删除的
+   * 「半音差徽章」（块右上角的 `+2` / `+4`）。徽章去掉后它没了别的
+   * 调用方，扁平成内联—— 级数地图和落库都不应依赖一个为显示而生的函数。
+   */
+  const rootSpelling = chord.split(':')[0].split('/')[0];
+  const r = PITCH[rootSpelling];
+  const t = PITCH[tonic];
+  if (r == null || t == null) return null;
+  const semi = ((r - t) % 12 + 12) % 12;
+  /**
+   * 关系主音相对本轨主音的音程：
+   *
+   *   大调轨 → 关系小调主音在 **+9** 半音（C 大调 → A 小调）
+   *   小调轨 → 关系大调主音在 **+3** 半音（a 小调 → C 大调）
+   *
+   * ⚠️ 然后要算「和弦相对关系主音」的音程 = `semi - viewTonic`。
+   * 之前写成 `semi + viewTonic`，等于把和弦又往关系主音反方向挪了一遍，
+   * 结果 A 大调的 A（关系主音本身）算成 b5 而不是 1。
+   */
+  const viewTonic = mode === 'major' ? 9 : 3;
+  const rel = ((semi - viewTonic) % 12 + 12) % 12;
+  /**
+   * 编号基准跟着**关系调自己的调式**走：
+   *
+   *   大调轨 → 关系小调 → 用自然小调音阶编号
+   *   小调轨 → 关系大调 → 用大调音阶编号
+   *
+   * 这样关系调的和弦落在它自己的自然音级上，和主级数用同一套
+   * 「先看落在音阶哪一级、再补 b/#」的规则。
+   */
+  const scale = mode === 'major' ? NATURAL_MINOR_SCALE : MAJOR_SCALE;
+  const natural = scale.indexOf(rel);
+  if (natural >= 0) return String(natural + 1);
+  // 不在该调式音阶内：比某个自然音级低半音 → 写成它的降号形式
+  for (let i = 0; i < scale.length; i++) {
+    if ((scale[i] - rel + 12) % 12 === 1) return `b${i + 1}`;
+  }
+  // 再试升号（比某个自然音级高半音）
+  for (let i = scale.length - 1; i >= 0; i--) {
+    if ((rel - scale[i] + 12) % 12 === 1) return `#${i + 1}`;
+  }
+  return null;
+}
 
 /**
  * 用**真实拍点**把秒映射成 tick（这是「先对 BPM，再对和声在哪一拍」的落实）。
@@ -1009,7 +1181,9 @@ export function normalizeSections(a: AnalysisFile): StructureSegment[] {
  *
  * @param chords   和弦块（必须是当前实时数据，不是分析快照）
  * @param tonic    这条轨用哪个调性解释
- * @param mode     大调/小调（只影响显示标签，不影响数字计算）
+ * @param mode     大调/小调 —— **决定按哪个音阶编号**：
+ *                 d 小调轨上 `Bb:maj` 是 `6:maj`（自然小调 VI 级），
+ *                 不是按大调尺子算出的 `b7:maj`。
  * @param trackId  轨道 id，多条级数轨靠它区分
  */
 export function makeDegreeTrack(
@@ -1021,7 +1195,7 @@ export function makeDegreeTrack(
   const modeLabel = mode === 'major' ? 'major' : 'minor';
   const clips: RealClip[] = chords.map((c, i) => {
     // 解析不出来的（N / 未识别 / 中文）留空壳，等用户补完和弦自动算出
-    const deg = chordToNumber(c.label, tonic);
+    const deg = chordToNumber(c.label, tonic, mode);
     return {
       id: trackId + '-c' + i,
       startTick: c.startTick,
@@ -1049,6 +1223,59 @@ export function makeDegreeTrack(
   };
 }
 
+/**
+ * 两个主音之间的**最短音程**（-6 … +6）。
+ *
+ * ## 用户要的东西
+ *
+ * 「F 大调比 D 大调多了 3 个半音，就显 +3，
+ * 但加到一定程度就变成 - 了」
+ *
+ * 也就是说，不能只给 0–11 的正数 —— 11 个半音听起来像「很远」，
+ * 但反方向只差 1 个半音，应该嘴上说 `-1`。
+ * 所以这里取**最短路径**，范围落在 -6…+6：
+ *
+ *   | 原始差 | 显示 | 理由 |
+ *   |---|---|---|
+ *   | 0 | 0 | 同调 |
+ *   | 1…6 | +1…+6 | 往上最近 |
+ *   | 7…11 | -5…-1 | 往下更近（也就是「加到一定程度变 - 」） |
+ *
+ * ## 为什么止于 ±6
+ *
+ * 十二平均律里两个音最多相隔 6 个半音（增四度 = 减五度）。
+ * 超过 6 就说明走了远路。
+ *
+ * @returns -6…+6；任一主音认不出时返回 null
+ */
+export function tonicInterval(from: string, to: string): number | null {
+  const a = PITCH[from];
+  const b = PITCH[to];
+  if (a == null || b == null) return null;
+  const raw = ((b - a) % 12 + 12) % 12;
+  /**
+   * 同音直接返回 0。
+   *
+   * ⚠️ 不能省略：下面的 `raw - 12` 在 raw=12 时会得到 **-0**，
+   * 而 `-0 === 0` 为 true 但 `Object.is(-0, 0)` 为 false。
+   * 测试里用 `toBe(0)` 会意外失败，而且 `formatInterval(-0)`
+   * 也可能打印出奇怪的东西。直接铉死成 +0。
+   */
+  if (raw === 0) return 0;
+  // 7–11 改走反方向：11 → -1、7 → -5
+  return raw > 6 ? raw - 12 : raw;
+}
+
+/**
+ * 音程差 → 显示文本（`+3`、`-1`、`0`）。
+ *
+ * `0` 不写成 `+0`：它表示「两条轨同调」，
+ * 写成 `+0` 反而像“要加什么”。
+ */
+export function formatInterval(semitones: number): string {
+  if (semitones === 0) return '0';
+  return semitones > 0 ? `+${semitones}` : String(semitones);
+}
 /**
  * 一条级数轨该用哪个主音来换算级数。
  *
@@ -1298,7 +1525,7 @@ export function makeRealTracks(
   const degreeClips: RealClip[] = [];
   for (let i = 0; i < chordClips.length; i++) {
     const c = chordClips[i];
-    const deg = chordToNumber(c.label, key.tonic);
+    const deg = chordToNumber(c.label, key.tonic, key.mode === 'minor' ? 'minor' : 'major');
     degreeClips.push({
       id: `deg-${i}`,
       startTick: c.startTick,
@@ -1328,7 +1555,6 @@ export function makeRealTracks(
   // 结构段从 bar 号换 tick，基准同样要按拍号（6/8 → 2880）
   const TICKS_PER_BAR_LOCAL = barTicksOf(meterOf(a));
   const normalized = normalizeSections(a);
-  const autoSections = normalized;
   const analysisIsEmpty = a.downbeatsSec.length === 0 && (a.chords['submission'] ?? []).length === 0;
   const structureSource: StructureSegment[] = analysisIsEmpty
     ? []
@@ -1365,7 +1591,18 @@ export function makeRealTracks(
       id: 'tr-section',
       kind: 'section',
       name: '歌曲结构',
-      layer: autoSections.length > 0 ? 'all-in-one-infer 自动分析' : '人工校对（参考 Song Master Pro）',
+      /**
+       * 结构轨的副标题留空。
+       *
+       * 原来写的是 `all-in-one-infer 自动分析` / `人工校对（参考 Song Master Pro）`，
+       * 但轨道头只有 148px，实测被截成了 `all-in-one-infer 自...` ——
+       * 看不全的模型名不但没信息量，还占掉了本该给调性徽章的位置。
+       * 用户明确要求去掉。
+       *
+       * 模型来源仍然保留在 `name` 上的业务语义里（结构段自带 `layer`），需要时从那里取；
+       * 界面上不再重复这个信息。
+       */
+      layer: undefined,
       visible: true,
       clips: sectionClips,
     },

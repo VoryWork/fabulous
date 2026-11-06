@@ -34,6 +34,15 @@ interface Props {
 
   /** 外部要求展开选择器的信号（每次 +1 触发一次展开） */
   openPickerSignal?: number;
+  /**
+   * 当前轨的主音与调式，转给和弦选择器做级数预览。
+   *
+   * 不传也不影响功能 —— 预览只是帮用户确认「这个写法在当前调里是几级」。
+   */
+  tonic?: string;
+  mode?: 'major' | 'minor';
+  /** 当前是内置示例数据（用来解释「为何没有备选」） */
+  synthetic?: boolean;
 }
 
 const props = defineProps<Props & { width?: number }>();
@@ -220,7 +229,19 @@ const relations = [
             把可操作的选项藏在另一个标签页里等于没有。
             点击即替换（走编辑层，支持 Ctrl+Z 撤销）。
           -->
-          <div v-if="alternatives.length" class="section">
+          <!--
+            候选和弦区域。
+
+            ## 为什么要有「没有备选」的空态
+
+            之前是 `v-if="alternatives.length"` —— 没有备选时整块**不渲染**，
+            连标题都看不到。用户点开和弦块发现什么都没有，
+            只能猜「模型没给备选」，而实际上大多数情况是
+            **这份分析对象里就没存备选**（老产物 / 合成数据 /
+            从没跑过含概率导出的那条路径）。两种情况处理方式完全不同，
+            必须告诉用户是哪一种。
+          -->
+          <div class="section">
             <div class="section-title">
               候选和弦
               <span v-if="isAmbiguous" class="ambig-tag" title="前两名概率接近，这里本来就模棱两可">
@@ -259,7 +280,18 @@ const relations = [
                 </span>
               </div>
             </button>
-            <div class="alt-hint">
+            <!-- 没有备选：说清是数据原因，不是功能缺失 -->
+            <div v-if="!alternatives.length" class="alt-empty">
+              <template v-if="props.synthetic">
+                当前是内置示例数据，没有保存模型的概率分布
+              </template>
+              <template v-else>
+                这份分析没有保存备选和弦
+                <br />
+                <span class="alt-empty-sub">重新分析后会出现（需要模型概率导出）</span>
+              </template>
+            </div>
+            <div v-else class="alt-hint">
               点其他项即可替换（Ctrl+Z 撤销）· 概率来自模型的逐帧分布
               <template v-if="alternatives.some((x) => x.fromMadmom)">
                 · 标「交叉」的来自第二引擎 madmom（只能识别大小三和弦）
@@ -282,6 +314,8 @@ const relations = [
             <ChordPicker
               v-if="pickerOpen"
               :current="clip.label"
+              :tonic="tonic"
+              :mode="mode"
               @pick="emit('pick-chord', $event)"
             />
           </div>

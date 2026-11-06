@@ -31,6 +31,8 @@ import {
   inferKey,
   makeBeatSnapper,
   fixDownbeats,
+  UNRECOGNIZED_LABEL,
+  chordToNumber,
   makeDegreeTrack,
   type AnalysisFile,
   type RealClip,
@@ -40,6 +42,7 @@ import {
 import { relatedMinor } from './timeline/domain/ChordNotation';
 import { PPQ } from './timeline/domain/Tick';
 import {
+  isTauri,
   loadEdits,
   readTextFile,
   saveEdits,
@@ -53,6 +56,7 @@ import {
   serializeFbsong,
   suggestFileName,
 } from './export/exporters';
+import { MSTRUCT_EXT, buildMStructDocument, serializeMStruct } from './export/mstruct';
 import { barAt, tickOfBar } from './timeline/domain/MeterMap';
 import { tickToSec, bpmAt, createConstantTempoMap } from './timeline/domain/TempoMap';
 import { usePlayback } from './timeline/audio/usePlayback';
@@ -1324,6 +1328,62 @@ async function onExportFbsong() {
   });
 }
 
+/**
+ * 导出 MStruct 分析文件（.mstruct）。
+ *
+ * ## 用哪份数据
+ *
+ * 用 `allTracks` 里的和弦轨（已含用户编辑），不是 `data.value`（分析快照）。
+ * 理由：用户在编辑器里改过的和弦必须反映到导出结果，
+ * 否则「导出后和自己屏幕上不一样」就是 bug。
+ *
+ * ## 拍号与调性
+ *
+ * 拍号用 `meterMap`（已处理拍号变化与弱起）；
+ * 调性用 `effectiveKey`（用户手动改过就是改过的那个）。
+ */
+async function onExportMstruct() {
+  if (!hasAnalyzableData.value) return;
+  const chordTrack = allTracks.value.find((t) => t.kind === 'chord');
+  if (!chordTrack) {
+    showNotice('没有和弦轨，无法导出 MStruct');
+    return;
+  }
+
+  const doc = buildMStructDocument({
+    title: SONG.value.title,
+    artist: SONG.value.artist,
+    chords: chordTrack.clips.map((c) => ({
+      startTick: c.startTick,
+      endTick: c.endTick,
+      label: c.label,
+    })),
+    key: effectiveKey.value,
+    meterMap: meterMap.value,
+    bpm: SONG.value.bpm,
+    unrecognizedLabel: UNRECOGNIZED_LABEL,
+    /** 罗马数字用的级数计算器（和级数轨同一个函数，保证一致） */
+    degreeOf: chordToNumber,
+    /** 结构段（用于曲式标签 `Pop_Form:Verse` 这类） */
+    sections: (allTracks.value.find((t) => t.kind === 'section')?.clips ?? []).map((c) => ({
+      startTick: c.startTick,
+      endTick: c.endTick,
+      label: c.label,
+    })),
+  });
+
+  if (doc.warnings.length) {
+    showNotice(doc.warnings[0]);
+  }
+
+  await saveTextWithDialog({
+    fileName: suggestFileName(SONG.value.title, MSTRUCT_EXT),
+    content: serializeMStruct(doc),
+    filterName: 'MStruct 分析文件',
+    extensions: [MSTRUCT_EXT],
+  });
+}
+
 /** 当前曲目是否正在分析（顶栏按钮用） */
 /**
  * 当前歌曲是否正在分析。
@@ -1781,6 +1841,15 @@ const selectedClip = computed(() => {
     confidence: live.confidence,
     alternatives: live.alternatives,
     source: 'lv-chordia s0–s4',
+    /**
+     * 这份分析是不是内置示例数据。
+     *
+     * 用于检查器里区分「无备选」的原因：
+     *   - 示例数据 → 本来就没有概率分布（合成产物）
+     *   - 真实分析 → 这次导出没保存备选（重新分析可补回）
+     * 两种情况应该告诉用户不同的事情。
+     */
+    synthetic: !isTauri(),
     rawStartSec: tickToSec(tempoMap.value, live.startTick) - 0.02,
     rawEndSec: tickToSec(tempoMap.value, live.endTick) + 0.03,
   };
@@ -1818,6 +1887,7 @@ const selectedClip = computed(() => {
       @reanalyze="onReanalyze"
       :can-export="hasAnalyzableData"
       @export-fbsong="onExportFbsong"
+      @export-mstruct="onExportMstruct"
       :key-is-manual="SONG.keyIsManual"
       :auto-key="autoKeyInfo"
       :key-value="effectiveKey"
@@ -1919,6 +1989,9 @@ const selectedClip = computed(() => {
         :clip="selectedClip"
         :width="inspectorWidth"
         :open-picker-signal="openPickerNonce"
+        :synthetic="selectedClip?.synthetic === true"
+        :tonic="effectiveKey.tonic"
+        :mode="effectiveKey.mode"
         @pick-chord="onPickChord"
         @set-label="onSetClipLabel"
       />
@@ -2073,3 +2146,4 @@ const selectedClip = computed(() => {
   z-index: 50;
 }
 </style>
+

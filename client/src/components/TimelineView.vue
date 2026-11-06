@@ -31,7 +31,15 @@ import {
 } from '../timeline/domain/TimelineGeometry';
 import { barAt, barLinesInRange, beatLinesInBar, meterAt, tickOfBar } from '../timeline/domain/MeterMap';
 import { useClipEditing } from '../timeline/interaction/useClipEditing';
-import { degreeTonicOf, shouldHighlightDegree } from '../timeline/demo/realData';
+import {
+  degreeTonicOf,
+  relativeDegree,
+  relativeKeyName,
+  formatInterval,
+  relativeTonicOf,
+  tonicInterval,
+  shouldHighlightDegree,
+} from '../timeline/demo/realData';
 import ContextMenu, { type MenuItem } from './ContextMenu.vue';
 import type { ClipState } from '../timeline/domain/EditCommands';
 import type { TrackKindC } from '../timeline/domain/ConstraintEngine';
@@ -238,6 +246,34 @@ const keyPopFor = ref<string | null>(null);
  */
 let keyPopOpenedAt = 0;
 
+/**
+ * 这条级数轨的主音相对**全局主调**差几个半音。
+ *
+ * ## 为什么要显示这个
+ *
+ * 用户的原话：「F 大调比 D 大调多了 3 个半音，就显 +3，
+ * 但加到一定程度就变成 - 了」。
+ *
+ * 多条级数轨的意义就是并排对照不同调的解释。光看调名（`D 大调`
+ * vs `F 大调`）要在脑子里换算一次；直接标上 `+3` 就能知道
+ * 「这条轨比主调高三个半音」，对照两行数字时不用再算。
+ *
+ * ## 基准是谁
+ *
+ * 全局主调（`props.keyTonic`）。因为第一条级数轨「级数解释」跟随的就是它，
+ * 两条轨並排时「相对第一条差多少」才是用户真正关心的问题。
+ * 自动轨自身与全局一致，计算出 0，UI 上不显示徽章。
+ *
+ * @returns `null` = 不需要显示（同调 / 主音缺失）
+ */
+function degreeTrackInterval(id: string): number | null {
+  const t = props.tracks.find((x) => x.id === id);
+  if (!t || t.kind !== 'degree') return null;
+  const tonic = t.degreeTonic || props.keyTonic || '';
+  const base = props.keyTonic || '';
+  if (!tonic || !base || tonic === base) return null;
+  return tonicInterval(base, tonic);
+}
 /** 弹层当前用的调性值（从轨道名解析） */
 function degreeTrackKeyValue(id: string): { tonic: string; mode: 'major' | 'minor' } {
   const t = props.tracks.find((x) => x.id === id);
@@ -1915,6 +1951,13 @@ interface RenderedClip {
   keyMatch?: boolean;
   /** 结构段自己的调性（画块内徽章用） */
   sectionKey?: { tonic: string; mode: 'major' | 'minor' };
+
+  /** 级数轨才有：换到关系大小调视角的第几级（1–7 带 b/#） */
+  relativeDeg?: string | null;
+  /** 级数轨才有：关系调标签（「关系大调」/「关系小调」） */
+  relativeTonic?: string;
+  /** 级数轨才有：关系调的完整调名（`F major`），只用于悬浮提示 */
+  relativeKey?: string;
 }
 
 /**
@@ -2011,14 +2054,33 @@ function clipsFor(track: RealTrack): RenderedClip[] {
   const tonic = degreeTonicOf(track, props.keyTonic);
 
   /**
-   * 级数块的副标题（块内右下角的小字）也要跟着当前调性走。
-   *
-   * 它原本是生成轨道时写死的 `${tonic} ${mode}`。用户手动改全局调性后，
-   * 数字按新调性算了，小字还写着旧调性 —— 看上去就是「调号没换」。
+   * 这条级数轨的调式。
    *
    * 自动轨没有 `degreeMode`，取全局的 `keyMode`。
+   * 它决定**按哪个音阶编号**（d 小调里 Bb 是 6，不是 b7），
+   * 所以下面算数字和关系调级数都要用它。
    */
-  const degreeSub = `${tonic} ${(track.degreeMode ?? props.keyMode) === 'minor' ? 'minor' : 'major'}`;
+  const degreeMode: 'major' | 'minor' =
+    (track.degreeMode ?? props.keyMode) === 'minor' ? 'minor' : 'major';
+
+  /**
+   * 级数块的副标题**不再放调名**。
+   *
+   * ## 为什么去掉
+   *
+   * 调性是**整条轨的属性**，不是某个块的信息。用户的原话：
+   * 「调性完美没必要重复那么多个」。
+   *
+   * 之前每个块第二行都写 `G major`，一屏里同一个词重复十几遍，
+   * 既没信息量又挤掉了真正会变的那个数字（关系调级数）。
+   *
+   * 调性现在只在两处出现，各写一次：
+   *   - 自动轨：轨道头「G major（自动推断）」
+   *   - 自定义轨：轨道头的调性徽章按钮（可点开改）
+   *
+   * 块里保留的只有**逐块不同**的信息：关系调级数、半音差。
+   */
+  const degreeSub = '';
 
   /**
    * ## 级数轨：**完全从和弦轨实时派生**，不读自己的块列表
@@ -2055,8 +2117,11 @@ function clipsFor(track: RealTrack): RenderedClip[] {
 
       out.push({
         id: cellId,
-        label: chordToNumber(cc.label, tonic) ?? '—',
+        label: chordToNumber(cc.label, tonic, degreeMode) ?? '—',
         sublabel: degreeSub,
+        relativeDeg: relativeDegree(cc.label, tonic, degreeMode),
+        relativeTonic: relativeTonicOf(tonic, degreeMode),
+        relativeKey: relativeKeyName(tonic, degreeMode),
         left: rect.left,
         width: rect.width,
         kind: 'degree',
@@ -2098,10 +2163,13 @@ function clipsFor(track: RealTrack): RenderedClip[] {
      * 而不是让块整个消失 —— 用户要能看到"这里有一条级数块等着被补"。
      */
     let displayLabel = c.label;
+    /** 级数轨才有：关系调级数（旧快照分支也要算，否则样式一致但内容空） */
+    let relativeDeg: string | null = null;
     if (isDegreeTrack) {
       const parent = c.parentId ? editing.clipById(c.parentId) : null;
       const chordLabel = parent?.label ?? '';
-      displayLabel = chordToNumber(chordLabel, tonic) ?? '—';
+      displayLabel = chordToNumber(chordLabel, tonic, degreeMode) ?? '—';
+      relativeDeg = relativeDegree(chordLabel, tonic, degreeMode);
     }
 
     /**
@@ -2138,6 +2206,9 @@ function clipsFor(track: RealTrack): RenderedClip[] {
       id: c.id,
       label: displayLabel,
       sublabel: isDegreeTrack ? degreeSub : c.sublabel,
+      relativeDeg,
+      relativeTonic: isDegreeTrack ? relativeTonicOf(tonic, degreeMode) : undefined,
+      relativeKey: isDegreeTrack ? relativeKeyName(tonic, degreeMode) : undefined,
       left: span.left,
       width: span.width,
       kind: track.kind,
@@ -2432,6 +2503,22 @@ defineExpose({
                 >
                   {{ degreeTrackKeyOf(t.id) }}
                 </button>
+                <!--
+                  与主调的音程差。
+
+                  例：主调 D 大调、这条轨 F 大调 → `+3`（F 比 D 高 3 个半音）。
+                  直接看数字就知道两条轨相差多远，不必在脑子里换算调名。
+
+                  取**最短路径**（-6…+6）：第 7–11 个半音改走反方向，
+                  所以 `+11` 会显示成 `-1` —— 那才是人实际感受的距离。
+                -->
+                <span
+                  v-if="degreeTrackInterval(t.id) != null"
+                  class="track-key-interval"
+                  :title="`比主调 ${props.keyTonic} 高 ${degreeTrackInterval(t.id)} 个半音`"
+                >
+                  {{ formatInterval(degreeTrackInterval(t.id)!) }}
+                </span>
                 <button
                   v-if="!readonly"
                   class="track-remove"
@@ -2563,8 +2650,31 @@ defineExpose({
               }"
             >
               <span class="clip-label" v-if="c.wide">{{ c.label }}</span>
-              <span class="clip-sub" v-if="c.wide && c.sublabel && c.width > 70">
-                {{ c.sublabel }}
+              <!--
+                级数块第二行：**只有关系调级数**。
+
+                「1:maj」那一行是**本条轨主调**的级数 —— 用户选了 D minor，
+                它就是 D minor 的级数（Bb 显示 6 而不是 b7）。
+
+                ## 为什么这里没有调名
+
+                调性是整条轨的属性，轨道头已经写了一次（自动轨是
+                「G major（自动推断）」，自定义轨是可点击的调性徽章）。
+                块里再写一遍等于同一句话重复十几遍 —— 用户的原话是
+                「调性完美没必要重复那么多个」。
+
+                所以这里只留**逐块会变**的那一项：换到关系调是第几级。
+              -->
+              <span
+                v-if="c.wide && c.width > 70 && c.relativeDeg"
+                class="clip-sub"
+              >
+                <span
+                  class="clip-relative"
+                  :title="`换到${c.relativeTonic}（${c.relativeKey}）看是第 ${c.relativeDeg} 级`"
+                >
+                  {{ c.relativeTonic }} {{ c.relativeDeg }}
+                </span>
               </span>
               <!--
                 置信度圆点。
@@ -2834,6 +2944,26 @@ defineExpose({
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 56px;
+}
+/**
+ * 与主调的音程差徽章（`+3` / `-1`）。
+ *
+ * 用 accent 色而不是灰色：这个数字是「两条轨差多远」的
+ * 结论性信息，不像调性徽章那样只是入口。
+ *
+ * `tabular-nums` 保证 `+3` 和 `-11` 字宽一致，不会让徽章忽宽忽窄。
+ */
+.track-key-interval {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #e8722d) 12%, transparent);
+  font-size: 9px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent, #e8722d);
+  white-space: nowrap;
 }
 .track-key-btn:hover:not(:disabled) {
   border-color: var(--accent, #e8722d);
